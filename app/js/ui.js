@@ -119,3 +119,66 @@ export function fmtSize(bytes) {
   if (bytes > 1 << 20) return (bytes / (1 << 20)).toFixed(1) + ' MB';
   return Math.max(1, Math.round(bytes / 1024)) + ' KB';
 }
+
+/** 全屏看图：滚轮 / 双指缩放，拖动平移，双击放大，单击或 Esc 关闭 */
+export function imageViewer(src) {
+  document.querySelector('.viewer')?.remove();
+  const img = h('img', { src, alt: '插画', draggable: false });
+  const closeBtn = h('button.icon-btn.viewer-close', { type: 'button', 'aria-label': '关闭' }, icon('close'));
+  const root = h('div.viewer', { role: 'dialog', 'aria-label': '查看插画' }, img, closeBtn, h('p.viewer-hint', '双击放大，单击关闭'));
+  let scale = 1, tx = 0, ty = 0;
+  const apply = (smooth = false) => {
+    img.style.transition = smooth ? 'transform .2s ease-out' : 'none';
+    img.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+    root.classList.toggle('is-zoomed', scale > 1.01);
+  };
+  const zoomAt = (x, y, next, smooth) => { // 以屏幕上的 (x, y) 为中心缩放
+    next = Math.min(6, Math.max(1, next));
+    const cx = x - innerWidth / 2, cy = y - innerHeight / 2, k = next / scale;
+    tx = cx - (cx - tx) * k; ty = cy - (cy - ty) * k; scale = next;
+    if (scale === 1) { tx = 0; ty = 0; }
+    apply(smooth);
+  };
+  const close = () => { window.removeEventListener('keydown', onKey, true); root.remove(); };
+  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); close(); } };
+  window.addEventListener('keydown', onKey, true);
+  closeBtn.addEventListener('click', (e) => { e.stopPropagation(); close(); });
+
+  const pts = new Map();
+  let moved = 0, pinch = 0, lastTap = 0, tapTimer = null;
+  root.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('button')) return;
+    root.setPointerCapture(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 1) moved = 0;
+    if (pts.size === 2) { const [a, b] = [...pts.values()]; pinch = Math.hypot(a.x - b.x, a.y - b.y); }
+  });
+  root.addEventListener('pointermove', (e) => {
+    const p = pts.get(e.pointerId);
+    if (!p) return;
+    const dx = e.clientX - p.x, dy = e.clientY - p.y;
+    p.x = e.clientX; p.y = e.clientY;
+    moved += Math.abs(dx) + Math.abs(dy);
+    if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinch) zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, scale * (d / pinch));
+      pinch = d;
+    } else if (scale > 1) { tx += dx; ty += dy; apply(); }
+  });
+  const up = (e) => {
+    if (!pts.delete(e.pointerId)) return;
+    pinch = 0;
+    if (pts.size || moved > 10 || e.type === 'pointercancel') return;
+    const now = Date.now();
+    if (now - lastTap < 300) { // 双击：放大 / 还原
+      clearTimeout(tapTimer); lastTap = 0;
+      zoomAt(e.clientX, e.clientY, scale > 1.01 ? 1 : 2.5, true);
+    } else { lastTap = now; tapTimer = setTimeout(close, 300); }
+  };
+  root.addEventListener('pointerup', up);
+  root.addEventListener('pointercancel', up);
+  root.addEventListener('wheel', (e) => { e.preventDefault(); zoomAt(e.clientX, e.clientY, scale * (e.deltaY < 0 ? 1.2 : 1 / 1.2)); }, { passive: false });
+  document.body.append(root);
+  return { close };
+}

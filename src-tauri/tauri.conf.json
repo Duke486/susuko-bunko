@@ -1,12 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Susuko Bunko",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "identifier": "com.susuko.bunko",
   "build": {
     "frontendDist": "../app"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "スス子文庫",
@@ -14,7 +15,11 @@
         "height": 800,
         "minWidth": 360,
         "minHeight": 520,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "transparent": true,
+        "windowEffects": {
+          "effects": ["mica"]
+        }
       }
     ],
     "security": {

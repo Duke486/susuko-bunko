@@ -35,7 +35,18 @@ export class Epub {
 
     const text = (name) => (byTag(opf, name)[0]?.textContent || '').trim();
     this.title = text('title');
-    this.author = byTag(opf, 'creator').map((n) => n.textContent.trim()).filter(Boolean).join('、');
+    // 作者与插画师：角色写在 opf:role 属性（EPUB2）或 refines 的 meta（EPUB3）里，ill = 插画
+    const roleOf = (n) => {
+      const direct = n.getAttribute('opf:role') || n.getAttributeNS('http://www.idpf.org/2007/opf', 'role');
+      if (direct) return direct;
+      const id = n.getAttribute('id');
+      const refine = id && byTag(opf, 'meta').find((m) => m.getAttribute('refines') === '#' + id && m.getAttribute('property') === 'role');
+      return refine ? refine.textContent.trim() : '';
+    };
+    const people = [...byTag(opf, 'creator'), ...byTag(opf, 'contributor')]
+      .map((n) => ({ name: n.textContent.trim(), role: roleOf(n), creator: n.localName === 'creator' })).filter((x) => x.name);
+    this.author = people.filter((x) => x.creator && x.role !== 'ill').map((x) => x.name).join('、');
+    this.illustrator = people.filter((x) => x.role === 'ill').map((x) => x.name).join('、');
     this.language = text('language');
     // 系列与卷号：Calibre 写法或 EPUB3 的 belongs-to-collection
     const metas = byTag(opf, 'meta');

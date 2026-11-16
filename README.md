@@ -1,14 +1,11 @@
 # スス子文庫（Susuko Bunko）
-[![下载 Windows 版](https://img.shields.io/badge/下载-Windows%20版-0078D4?style=for-the-badge&logo=windows)](https://github.com/TimeyearsShine/susuko-bunko/releases/latest/download/SusukoBunko-Setup.exe)
-
-[![下载安卓版](https://img.shields.io/badge/下载-安卓%20APK-3DDC84?style=for-the-badge&logo=android)](https://github.com/TimeyearsShine/susuko-bunko/releases/latest/download/SusukoBunko.apk)
 
 自托管同步的轻小说 / 漫画阅读器。书、合集和阅读进度都放在你自己的服务器上，Windows、安卓和浏览器看到的是同一个书架。
 
 - **格式**：EPUB（含插画）、CBZ / ZIP 漫画
-- **小说**：横排左右翻页，宽屏自动双页；字号、行距、页边距、字体、四种纸张；目录、进度条、章内链接。日文竖排书会被强制转成横排
+- **小说**：横排，可左右翻页（滑动 / 淡入动画，书页跟手，宽屏双页）或上下滚动；字号、行距、页边距、字体、四种纸张；目录、进度条、章内链接；按住插画可放大查看。日文竖排书会被强制转成横排
 - **漫画**：翻页（默认日漫右翻，宽屏双页）或下拉长条
-- **书架**：自建合集（一本书可以放进多个合集）、在读 / 未分类、搜索、排序、多选整理
+- **书架**：自建合集（一本书可以放进多个合集）、在读 / 已读完 / 未分类、搜索、排序、多选整理；作者、插画师、阅读状态都可以手动改
 - **系列与卷号**：导入时自动从 EPUB 信息或书名里识别；同系列叠成一本，点开按卷号排列；也可以多选后“设为系列”批量编号
 - **同步**：书籍文件 + 进度 + 合集。没下载的书边读边加载，不用等整本下完；读过或手动下载的书存在本机，离线也能读，联网后进度自动补传
 
@@ -84,6 +81,10 @@ npm run build:android                    # APK 在 src-tauri/gen/android/app/bui
 ## 升级服务端
 
 用新的 `app/` 和 `server/server.js` 覆盖旧文件后重启服务即可，`DATA_DIR` 里的数据不用动，环境变量也没变（仍然是 `SHIORI_KEY`）。
+
+## 关于云母效果
+
+Windows 11 的客户端使用系统自带的云母（Mica）材质做窗口背景；Windows 10、安卓和网页版没有这个系统材质，用半透明毛玻璃模拟。
 
 ## 已知限制
 

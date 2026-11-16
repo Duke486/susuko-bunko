@@ -73,7 +73,8 @@ export async function open({ host, book, title = book.title, source, progress, o
     const holder = h('div.comic-page');
     const touch = h('div.reader-touch');
     stage.replaceChildren(holder, touch);
-    let token = 0;
+    let token = 0, shown = -1;
+    const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     const spread = () => settings.spread && stage.clientWidth > stage.clientHeight * 1.15;
     function group(p) { // 当前画面显示哪几页：封面单独一页，其后两两成对
@@ -90,6 +91,12 @@ export async function open({ host, book, title = book.title, source, progress, o
       if (!srcs) { toast('这一页解不出来', { error: true }); return; }
       holder.classList.toggle('is-rtl', settings.rtl);
       holder.replaceChildren(...srcs.map((src, n) => h('img', { src, alt: `第 ${g[n] + 1} 页`, draggable: false })));
+      const turn = prefs.get('reader', {}).turn || 'slide'; // 和小说共用“翻页动画”设置
+      if (shown >= 0 && shown !== page && !calm && turn !== 'none') {
+        const from = (page > shown ? 1 : -1) * (settings.rtl ? -1 : 1); // 新的一页从哪一侧进来
+        holder.animate([{ opacity: 0.2, transform: `translateX(${turn === 'slide' ? from * 9 : 0}%)` }, { opacity: 1, transform: 'none' }], { duration: 220, easing: 'ease-out' });
+      }
+      shown = page;
       report(g[g.length - 1], saveNow);
       const last = g[g.length - 1];
       for (let i = last + 1; i <= Math.min(total - 1, last + 2); i++) urlOf(i);

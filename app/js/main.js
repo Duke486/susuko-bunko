@@ -19,7 +19,17 @@ export function applyTheme() {
   const t = prefs.get('theme', 'auto');
   const dark = t === 'dark' || (t === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  // Windows 客户端：让系统的云母材质跟着应用的深浅色走
+  try { window.__TAURI__?.window?.getCurrentWindow?.().setTheme(t === 'auto' ? null : t)?.catch?.(() => {}); } catch { /* 网页版没有这个接口 */ }
 }
+// Windows 11 客户端的窗口背景是系统云母材质，界面要让出透明的地方给它
+(async () => {
+  try {
+    if (!store.isNativeShell || !navigator.userAgentData) return;
+    const info = await navigator.userAgentData.getHighEntropyValues(['platformVersion']);
+    if (navigator.userAgentData.platform === 'Windows' && parseInt(info.platformVersion, 10) >= 13) document.documentElement.classList.add('is-mica');
+  } catch { /* 判断不了就用普通背景 */ }
+})();
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
 applyTheme();
 
@@ -41,7 +51,7 @@ function renderSetup() {
         catch (err) { error.textContent = err.message; submit.disabled = false; submit.textContent = '连接'; }
       },
     },
-    h('div.brand.is-large', h('span.brand-mark', 'スス子'), h('span.brand-name', '文庫')),
+    h('div.brand.is-large', h('img.brand-icon', { src: 'icon-96.png', alt: '' }), h('span.brand-name', 'スス子文庫')),
     h('p.setup-lead', '连接你自己的服务器。书、合集和阅读进度都保存在那里，每台设备打开就是同一个书架。'),
     h('label.field-label', '服务器地址'), url,
     h('label.field-label', '访问密钥'), key,
@@ -56,7 +66,7 @@ const coverCache = new Map(); // 已解析好的封面地址，避免重绘闪�
 function booksIn(filter) {
   const all = Object.values(state.books);
   if (filter === 'all') return all;
-  if (filter === 'reading') return all.filter((b) => { const p = state.progress[b.id]; return p && p.percent > 0 && p.percent < 0.995; });
+  if (filter === 'reading' || filter === 'finished') return all.filter((b) => store.statusOf(b) === filter);
   if (filter === 'none') return all.filter((b) => !b.collections.length);
   if (isSeries(filter)) return all.filter((b) => b.series === filter.slice(7));
   return all.filter((b) => b.collections.includes(filter));
@@ -64,7 +74,7 @@ function booksIn(filter) {
 const isSeries = (filter) => filter.startsWith('series:');
 function filterName(filter) {
   if (isSeries(filter)) return filter.slice(7);
-  return { all: '全部', reading: '在读', none: '未分类' }[filter] || state.collections[filter]?.name || '全部';
+  return { all: '全部', reading: '在读', finished: '已读完', none: '未分类' }[filter] || state.collections[filter]?.name || '全部';
 }
 function openSeries(name) {
   if (!isSeries(view.filter)) view.back = view.filter;
@@ -116,7 +126,7 @@ function renderShelf() {
     els.grid, fileInput);
 
   app.replaceChildren(h('div.shell',
-    h('aside.side', h('div.brand', h('span.brand-mark', 'スス子'), h('span.brand-name', '文庫')), els.nav),
+    h('aside.side', h('div.brand', h('img.brand-icon', { src: 'icon-96.png', alt: '' }), h('span.brand-name', 'スス子文庫')), els.nav),
     els.main, els.bar));
   renderAll();
 }
@@ -124,7 +134,7 @@ function renderShelf() {
 function renderAll() {
   if (!els) return;
   if (isSeries(view.filter)) { if (!booksIn(view.filter).length) view.filter = view.back || 'all'; }
-  else if (!['all', 'reading', 'none'].includes(view.filter) && !state.collections[view.filter]) view.filter = 'all';
+  else if (!['all', 'reading', 'finished', 'none'].includes(view.filter) && !state.collections[view.filter]) view.filter = 'all';
   renderNav(); renderHeading(); renderGrid(); renderSync(); renderBar();
 }
 
@@ -134,7 +144,7 @@ function renderNav() {
     type: 'button', 'aria-current': active === filter ? 'page' : null, onclick: () => setFilter(filter),
   }, icon(iconName, 18), h('span.nav-label', label), h('span.nav-count', booksIn(filter).length));
   els.nav.replaceChildren(
-    item('all', 'books', '全部'), item('reading', 'clock', '在读'), item('none', 'inbox', '未分类'),
+    item('all', 'books', '全部'), item('reading', 'clock', '在读'), item('finished', 'check', '已读完'), item('none', 'inbox', '未分类'),
     h('div.nav-section', h('span', '合集'),
       h('button.icon-btn.is-small', { type: 'button', 'aria-label': '新建合集', title: '新建合集', onclick: newCollection }, icon('plus', 16))),
     ...store.sortedCollections().map((c) => item(c.id, 'folder', c.name)),
@@ -192,16 +202,16 @@ function coverOf(book) {
       store.coverUrl(book).then((url) => { if (url) { coverCache.set(key, url); img.src = url; fb.replaceWith(img); } }).catch(() => {});
     }
   }
-  if (progress > 0 && progress < 0.995) cover.append(h('span.ribbon', { style: `--p:${progress.toFixed(3)}`, 'aria-hidden': 'true' }));
+  if (store.statusOf(book) === 'reading') cover.append(h('span.ribbon', { style: `--p:${Math.min(1, progress).toFixed(3)}`, 'aria-hidden': 'true' }));
   return cover;
 }
 
 /** 同一系列叠成一本，点开看各卷 */
 function stackCard(name, books) {
   const sorted = [...books].sort(byVolume);
-  const current = sorted.find((b) => (state.progress[b.id]?.percent || 0) < 0.995) || sorted[0]; // 封面用正在读的那一卷
+  const current = sorted.find((b) => store.statusOf(b) !== 'finished') || sorted[0]; // 封面用正在读的那一卷
   const cover = coverOf(current);
-  const started = sorted.some((b) => state.progress[b.id]?.percent > 0);
+  const started = sorted.some((b) => store.statusOf(b) !== 'unread');
   return h('button.book.is-stack', {
     type: 'button', title: `${name}（共 ${books.length} 卷）`,
     onclick: () => openSeries(name),
@@ -216,7 +226,7 @@ function stackCard(name, books) {
 
 function bookCard(book) {
   const progress = state.progress[book.id]?.percent || 0;
-  const reading = progress > 0 && progress < 0.995;
+  const status = store.statusOf(book);
   const selected = view.selected.has(book.id);
   const cover = coverOf(book);
   if (book.series && book.volume != null) cover.append(h('span.cover-vol', { 'aria-hidden': 'true' }, String(book.volume)));
@@ -225,7 +235,8 @@ function bookCard(book) {
 
   let pressTimer = null, longPressed = false;
   const card = h('button.book' + (selected ? '.is-selected' : ''), {
-    type: 'button', 'aria-pressed': view.selecting ? String(selected) : null, title: book.title,
+    type: 'button', 'aria-pressed': view.selecting ? String(selected) : null,
+    title: [book.title, book.author && `作者：${book.author}`, book.illustrator && `插画：${book.illustrator}`].filter(Boolean).join('\n'),
     onclick: () => {
       if (longPressed) { longPressed = false; return; }
       if (view.selecting) toggleSelect(book.id); else location.hash = '#/read/' + book.id;
@@ -244,7 +255,8 @@ function bookCard(book) {
   h('span.book-title', book.series ? (book.volume != null ? `${book.series} ${book.volume}` : book.series) : book.title),
   h('span.book-meta',
     h('span.book-author', book.author || (book.format === 'cbz' ? '漫画' : '')),
-    progress > 0 && h('span.book-progress' + (reading ? '' : '.is-done'), fmtPercent(progress))),
+    status === 'finished' ? h('span.book-progress.is-done', '读完')
+      : status === 'reading' && h('span.book-progress', progress > 0 ? fmtPercent(Math.min(progress, 0.99)) : '在读')),
   );
   return card;
 }
@@ -275,6 +287,7 @@ function renderGrid() {
     action = h('button.btn.is-primary', { type: 'button', onclick: () => els.fileInput.click() }, icon('plus', 18), '导入第一本书');
   } else if (state.collections[view.filter]) { title = '这个合集还没有书'; text = '在书架上长按（或右键）一本书，选择“加入合集”。也可以直接在这里导入。'; }
   else if (view.filter === 'reading') { title = '没有正在读的书'; text = '打开任意一本书，它就会出现在这里。'; }
+  else if (view.filter === 'finished') { title = '还没有读完的书'; text = '读到最后一页的书会自动出现在这里，也可以多选后手动标记。'; }
   else { title = '所有书都已归入合集'; text = ''; }
   els.grid.replaceChildren(h('div.empty', h('h2', title), text && h('p', text), action));
 }
@@ -316,6 +329,7 @@ function renderBar() {
       act('加入合集', pickCollections, '.is-primary'),
       inCollection && act('移出本合集', removeFromCurrent),
       n === 1 ? act('修改信息', ([id]) => editBook(id)) : act('设为系列', setSeries),
+      act('标记状态', setStatus),
       ids.some((id) => !state.downloaded.has(id)) && act('下载到本机', downloadBooks),
       ids.some((id) => state.downloaded.has(id)) && act('移除本机副本', removeCopies),
       act('删除', deleteBooks, '.is-danger'),
@@ -402,6 +416,19 @@ async function downloadBooks(ids) {
   t.done(failed ? `${todo.length - failed} 本已下载，${failed} 本失败，请检查网络后重试` : `已下载 ${todo.length} 本到本机`, !!failed);
 }
 
+const STATUSES = [['', '按进度自动'], ['reading', '在读'], ['finished', '已读完']];
+function setStatus(ids) {
+  return dialog('标记状态', (close) => h('div.dialog-body',
+    h('div.menu', STATUSES.map(([value, label]) => h('button.menu-item', {
+      type: 'button',
+      onclick: async () => {
+        const ok = await guard(async () => { for (const id of ids) await store.updateBook(id, { status: value }); }, value ? `已标为「${label}」` : '已改回按进度自动判断');
+        if (ok) { close(); exitSelect(); }
+      },
+    }, label))),
+    h('p.field-hint', '手动标记不会改动阅读进度，下次打开仍然从上次的位置继续。')));
+}
+
 function commonPrefix(titles) {
   let prefix = titles[0] || '';
   for (const t of titles) { while (prefix && !t.startsWith(prefix)) prefix = prefix.slice(0, -1); }
@@ -444,17 +471,31 @@ function editBook(id) {
   return dialog('修改信息', (close) => {
     const title = h('input.field', { type: 'text', value: book.title, maxLength: 200, required: true });
     const author = h('input.field', { type: 'text', value: book.author, maxLength: 200 });
+    const illustrator = h('input.field', { type: 'text', value: book.illustrator || '', maxLength: 200 });
+    let status = book.status || '';
+    const statusSeg = h('div.segmented', { role: 'group', 'aria-label': '阅读状态' });
+    const drawStatus = () => statusSeg.replaceChildren(...STATUSES.map(([value, label]) => h('button' + (status === value ? '.is-on' : ''), {
+      type: 'button', onclick: () => { status = value; drawStatus(); },
+    }, label)));
+    drawStatus();
     const series = h('input.field', { type: 'text', value: book.series || '', maxLength: 200, placeholder: '不属于系列就留空', list: 'series-names' });
     const volume = h('input.field', { type: 'number', value: book.volume ?? '', min: 0, step: 'any', placeholder: '例如 3', inputMode: 'decimal' });
     const names = [...new Set(Object.values(state.books).map((b) => b.series).filter(Boolean))];
     return h('form.dialog-body', {
       onsubmit: async (e) => {
         e.preventDefault();
-        const patch = { title: title.value, author: author.value, series: series.value.trim(), volume: volume.value === '' ? null : Number(volume.value) };
+        const patch = {
+          title: title.value, author: author.value, illustrator: illustrator.value.trim(), status,
+          series: series.value.trim(), volume: volume.value === '' ? null : Number(volume.value),
+        };
         if (await guard(() => store.updateBook(id, patch), '已保存')) { close(); exitSelect(); }
       },
     },
-    h('label.field-label', '书名'), title, h('label.field-label', '作者'), author,
+    h('label.field-label', '书名'), title,
+    h('div.field-pair.is-even',
+      h('div', h('label.field-label', '作者'), author),
+      h('div', h('label.field-label', '插画'), illustrator)),
+    h('label.field-label', '阅读状态'), statusSeg,
     h('div.field-pair',
       h('div', h('label.field-label', '系列'), series),
       h('div', h('label.field-label', '卷号'), volume)),

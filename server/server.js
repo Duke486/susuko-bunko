@@ -15,7 +15,7 @@ const KEY = process.env.SHIORI_KEY || '';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const APP_DIR = path.resolve(process.env.APP_DIR || path.join(__dirname, '..', 'app'));
 const MAX_BOOK_BYTES = Number(process.env.MAX_BOOK_MB || 2048) * 1024 * 1024;
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 
 if (!KEY || KEY.length < 8) {
   console.error('请先设置访问密钥（至少 8 位）：SHIORI_KEY=xxxxxxxx node server.js');
@@ -164,6 +164,7 @@ async function uploadBook(req, res, q) {
     id, format, size, sha256: sha,
     title: str(q.get('title')) || str(q.get('name')) || '未命名',
     author: str(q.get('author')),
+    illustrator: str(q.get('illustrator'), 200), status: '',
     series: str(q.get('series'), 200), volume: volumeOf(q.get('volume')),
     fileName: str(q.get('name')),
     collections: cols, hasCover: false, addedAt: now, updatedAt: now,
@@ -190,6 +191,8 @@ async function api(req, res, url) {
       const body = await readJson(req);
       if (typeof body.title === 'string' && str(body.title)) book.title = str(body.title);
       if (typeof body.author === 'string') book.author = str(body.author);
+      if (typeof body.illustrator === 'string') book.illustrator = str(body.illustrator, 200);
+      if (['', 'reading', 'finished'].includes(body.status)) book.status = body.status; // 空 = 按进度自动判断
       if (typeof body.series === 'string') book.series = str(body.series, 200);
       if ('volume' in body) book.volume = volumeOf(body.volume);
       if (!book.series) book.volume = null;

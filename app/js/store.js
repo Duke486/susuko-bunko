@@ -361,6 +361,13 @@ export async function removeLocalCopy(bookId) {
   state.downloaded.delete(bookId); emit();
 }
 
+/** 阅读状态：手动设过就用手动的，否则按进度判断 */
+export function statusOf(book) {
+  if (book.status === 'reading' || book.status === 'finished') return book.status;
+  const p = state.progress[book.id]?.percent || 0;
+  return p >= 0.995 ? 'finished' : p > 0 ? 'reading' : 'unread';
+}
+
 export function natural(a, b) {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 }
@@ -384,7 +391,7 @@ async function inspect(file) {
     const cover = await epub.coverBlob().catch(() => null);
     const title = epub.title || name;
     const guess = epub.series ? { series: epub.series, volume: epub.volume } : guessSeries(title);
-    return { format: 'epub', title, author: epub.author, cover, ...guess };
+    return { format: 'epub', title, author: epub.author, illustrator: epub.illustrator, cover, ...guess };
   }
   if (ext === 'cbz' || ext === 'zip') {
     const zip = await ZipReader.open(file);
@@ -400,7 +407,7 @@ export async function importBook(file, collectionIds = []) {
   const info = await inspect(file);
   const q = new URLSearchParams({
     format: info.format, title: info.title, author: info.author, name: file.name, collections: collectionIds.join(','),
-    series: info.series || '', volume: info.volume ?? '',
+    series: info.series || '', volume: info.volume ?? '', illustrator: info.illustrator || '',
   });
   const { book, duplicate } = await (await api('/api/books?' + q, { method: 'POST', body: file })).json();
   let saved = book;
