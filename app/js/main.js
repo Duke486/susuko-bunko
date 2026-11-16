@@ -1,7 +1,7 @@
 // 书架、合集、导入与路由。
 import * as store from './store.js';
 import { state, prefs } from './store.js';
-import { h, icon, toast, dialog, confirmDialog, promptDialog, fmtPercent, fmtSize } from './ui.js';
+import { h, icon, toast, dialog, confirmDialog, promptDialog, dropdown, fmtPercent, fmtSize, fmtDuration } from './ui.js';
 
 const app = document.getElementById('app');
 const readerHost = document.getElementById('reader');
@@ -32,6 +32,9 @@ export function applyTheme() {
 })();
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
 applyTheme();
+
+// 安卓客户端的原生层在按下音量键时调用这里，阅读器监听 volumekey 事件来翻页
+window.__volumeKey = (dir) => { window.dispatchEvent(new CustomEvent('volumekey', { detail: dir })); };
 
 // ---------- 连接服务器 ----------
 function renderSetup() {
@@ -68,37 +71,37 @@ function booksIn(filter) {
   if (filter === 'all') return all;
   if (filter === 'reading' || filter === 'finished') return all.filter((b) => store.statusOf(b) === filter);
   if (filter === 'none') return all.filter((b) => !b.collections.length);
+  if (filter === 'stats') return [];
   if (isSeries(filter)) return all.filter((b) => b.series === filter.slice(7));
   return all.filter((b) => b.collections.includes(filter));
 }
 const isSeries = (filter) => filter.startsWith('series:');
 function filterName(filter) {
   if (isSeries(filter)) return filter.slice(7);
-  return { all: '全部', reading: '在读', finished: '已读完', none: '未分类' }[filter] || state.collections[filter]?.name || '全部';
+  return { all: '全部', reading: '在读', finished: '已读完', none: '未分类', stats: '阅读统计' }[filter] || state.collections[filter]?.name || '全部';
 }
 function openSeries(name) {
   if (!isSeries(view.filter)) view.back = view.filter;
-  setFilter('series:' + name);
+  setFilter('series:' + name, true);
 }
-function setFilter(filter) {
+/** keepSelect：进出系列时保留多选状态，方便先找到书再勾选 */
+function setFilter(filter, keepSelect = false) {
   view.filter = filter;
   if (!isSeries(filter)) prefs.set('filter', filter);
-  exitSelect(false);
+  if (!keepSelect) exitSelect(false);
   renderAll();
   els.main.scrollTop = 0;
 }
 
 function renderShelf() {
   const search = h('input.search-input', {
-    type: 'search', placeholder: '搜索书名或作者', 'aria-label': '搜索书名或作者',
+    type: 'search', placeholder: '搜索书名、作者、画师', 'aria-label': '搜索书名、作者、画师、出版社',
     oninput: () => { view.query = search.value.trim().toLowerCase(); renderGrid(); },
   });
-  const sort = h('select.select', {
-    'aria-label': '排序方式',
-    onchange: () => { view.sort = sort.value; prefs.set('sort', view.sort); renderGrid(); },
-  },
-  h('option', { value: 'recent' }, '最近阅读'), h('option', { value: 'added' }, '最近添加'), h('option', { value: 'title' }, '按书名'));
-  sort.value = view.sort;
+  const sort = dropdown({
+    label: '排序方式', value: view.sort, options: [['recent', '最近阅读'], ['added', '最近添加'], ['title', '按书名']],
+    onChange: (v) => { view.sort = v; prefs.set('sort', v); renderGrid(); },
+  });
   const fileInput = h('input', {
     type: 'file', multiple: true, hidden: true, accept: '.epub,.cbz,.zip,application/epub+zip,application/zip',
     onchange: () => { importFiles([...fileInput.files]); fileInput.value = ''; },
@@ -134,7 +137,7 @@ function renderShelf() {
 function renderAll() {
   if (!els) return;
   if (isSeries(view.filter)) { if (!booksIn(view.filter).length) view.filter = view.back || 'all'; }
-  else if (!['all', 'reading', 'finished', 'none'].includes(view.filter) && !state.collections[view.filter]) view.filter = 'all';
+  else if (!['all', 'reading', 'finished', 'none', 'stats'].includes(view.filter) && !state.collections[view.filter]) view.filter = 'all';
   renderNav(); renderHeading(); renderGrid(); renderSync(); renderBar();
 }
 
@@ -149,6 +152,9 @@ function renderNav() {
       h('button.icon-btn.is-small', { type: 'button', 'aria-label': '新建合集', title: '新建合集', onclick: newCollection }, icon('plus', 16))),
     ...store.sortedCollections().map((c) => item(c.id, 'folder', c.name)),
     h('button.nav-item.is-new', { type: 'button', onclick: newCollection }, icon('plus', 18), h('span.nav-label', '新建合集')),
+    h('div.nav-section', h('span', '记录')),
+    h('button.nav-item' + (active === 'stats' ? '.is-active' : ''), { type: 'button', onclick: () => setFilter('stats') },
+      icon('chart', 18), h('span.nav-label', '阅读统计')),
   );
 }
 
@@ -156,11 +162,13 @@ function renderHeading() {
   const isCollection = !!state.collections[view.filter];
   if (isSeries(view.filter)) {
     els.heading.replaceChildren(
-      h('button.icon-btn', { type: 'button', 'aria-label': `返回「${filterName(view.back || 'all')}」`, onclick: () => setFilter(view.back || 'all') }, icon('back')),
+      h('button.icon-btn', { type: 'button', 'aria-label': `返回「${filterName(view.back || 'all')}」`, onclick: () => setFilter(view.back || 'all', true) }, icon('back')),
       h('h1', filterName(view.filter)),
       h('span.heading-count', `${booksIn(view.filter).length} 卷`));
     return;
   }
+  els.main.classList.toggle('is-stats', view.filter === 'stats');
+  if (view.filter === 'stats') { els.heading.replaceChildren(h('h1', '阅读统计')); return; }
   els.heading.replaceChildren(
     h('h1', filterName(view.filter)),
     h('span.heading-count', `${booksIn(view.filter).length} 本`),
@@ -170,7 +178,9 @@ function renderHeading() {
 
 function visibleBooks() {
   let list = booksIn(view.filter);
-  if (view.query) list = list.filter((b) => (b.title + ' ' + b.author).toLowerCase().includes(view.query));
+  if (view.query) {
+    list = list.filter((b) => [b.title, b.author, b.illustrator, b.publisher, b.series].filter(Boolean).join(' ').toLowerCase().includes(view.query));
+  }
   const readAt = (b) => state.progress[b.id]?.updatedAt || 0;
   if (isSeries(view.filter)) list.sort(byVolume);
   else if (view.sort === 'title') list.sort((a, b) => store.natural(a.series || a.title, b.series || b.title) || byVolume(a, b));
@@ -212,8 +222,12 @@ function stackCard(name, books) {
   const current = sorted.find((b) => store.statusOf(b) !== 'finished') || sorted[0]; // 封面用正在读的那一卷
   const cover = coverOf(current);
   const started = sorted.some((b) => store.statusOf(b) !== 'unread');
+  if (view.selecting) { // 多选时：点开系列再勾选，角标显示这个系列里已选了几本
+    const picked = books.filter((b) => view.selected.has(b.id)).length;
+    cover.append(h('span.cover-check' + (picked ? '.is-on' : ''), picked ? String(picked) : null));
+  }
   return h('button.book.is-stack', {
-    type: 'button', title: `${name}（共 ${books.length} 卷）`,
+    type: 'button', title: view.selecting ? `点开「${name}」选择其中的书` : `${name}（共 ${books.length} 卷）`,
     onclick: () => openSeries(name),
     oncontextmenu: (e) => { e.preventDefault(); openSeries(name); },
   },
@@ -236,7 +250,8 @@ function bookCard(book) {
   let pressTimer = null, longPressed = false;
   const card = h('button.book' + (selected ? '.is-selected' : ''), {
     type: 'button', 'aria-pressed': view.selecting ? String(selected) : null,
-    title: [book.title, book.author && `作者：${book.author}`, book.illustrator && `插画：${book.illustrator}`].filter(Boolean).join('\n'),
+    title: [book.title, book.author && `作者：${book.author}`, book.illustrator && `插画：${book.illustrator}`,
+      book.publisher && `出版社：${book.publisher}`, book.rating > 0 && `评分：${'★'.repeat(book.rating)}${'☆'.repeat(5 - book.rating)}`].filter(Boolean).join('\n'),
     onclick: () => {
       if (longPressed) { longPressed = false; return; }
       if (view.selecting) toggleSelect(book.id); else location.hash = '#/read/' + book.id;
@@ -261,12 +276,73 @@ function bookCard(book) {
   return card;
 }
 
+// ---------- 阅读统计 ----------
+function renderStats() {
+  const range = view.statRange || 30;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = Array.from({ length: range }, (_, i) => { const d = new Date(today); d.setDate(d.getDate() - (range - 1 - i)); return d; });
+  const perDay = days.map((d) => Object.values(state.stats[store.dayKey(d)] || {}).reduce((a, b) => a + b, 0));
+  const total = perDay.reduce((a, b) => a + b, 0);
+  const perBook = new Map();
+  for (const d of days) for (const [id, sec] of Object.entries(state.stats[store.dayKey(d)] || {})) perBook.set(id, (perBook.get(id) || 0) + sec);
+  const ranked = [...perBook].filter(([id]) => state.books[id]).sort((a, b) => b[1] - a[1]);
+  const marks = Object.values(state.marks).reduce((n, list) => n + Object.keys(list).length, 0);
+
+  // 柱状图：7 / 30 天按天，90 天按周，365 天按月
+  let buckets;
+  if (range <= 30) buckets = days.map((d, i) => ({ label: `${d.getMonth() + 1}/${d.getDate()}`, short: range === 7 ? '日一二三四五六'[d.getDay()] : (d.getDate() === 1 || i === 0 || i % 5 === 0 ? `${d.getDate()}` : ''), sec: perDay[i] }));
+  else if (range === 90) {
+    buckets = [];
+    for (let i = 0; i < days.length; i += 7) buckets.push({ label: `${days[i].getMonth() + 1}/${days[i].getDate()} 起的一周`, short: buckets.length % 2 ? '' : `${days[i].getMonth() + 1}/${days[i].getDate()}`, sec: perDay.slice(i, i + 7).reduce((a, b) => a + b, 0) });
+  } else {
+    const by = new Map();
+    days.forEach((d, i) => { const k = `${d.getFullYear()}-${d.getMonth()}`; const b = by.get(k) || { label: `${d.getFullYear()} 年 ${d.getMonth() + 1} 月`, short: `${d.getMonth() + 1}月`, sec: 0 }; b.sec += perDay[i]; by.set(k, b); });
+    buckets = [...by.values()];
+  }
+  const peak = Math.max(1, ...buckets.map((b) => b.sec));
+  const week = [1, 2, 3, 4, 5, 6, 0].map((w) => ({ label: '周' + '日一二三四五六'[w], short: '日一二三四五六'[w], sec: days.reduce((n, d, i) => n + (d.getDay() === w ? perDay[i] : 0), 0) }));
+  const weekPeak = Math.max(1, ...week.map((b) => b.sec));
+  const bars = (list, top, cls = '') => h('div.bars' + cls, { role: 'img', 'aria-label': list.filter((b) => b.sec).map((b) => `${b.label} ${fmtDuration(b.sec)}`).join('，') || '这段时间没有阅读记录' },
+    list.map((b) => h('div.bar-col', { title: `${b.label}：${fmtDuration(b.sec)}` },
+      h('div.bar-track', h('div.bar' + (b.sec === top && b.sec > 0 ? '.is-peak' : ''), { style: `height:${b.sec ? Math.max(3, (b.sec / top) * 100) : 0}%` })),
+      h('span.bar-label', b.short))));
+  const hours = Math.floor(total / 3600), minutes = Math.round((total % 3600) / 60);
+  const seg = h('div.segmented', { role: 'group', 'aria-label': '统计范围' }, [7, 30, 90, 365].map((n) => h('button' + (n === range ? '.is-on' : ''), {
+    type: 'button', onclick: () => { view.statRange = n; renderGrid(); },
+  }, `${n} 天`)));
+  const fact = (value, unit, label) => h('div.fact', h('div.fact-value', String(value), h('small', unit)), h('div.fact-label', label));
+
+  els.grid.className = 'stats';
+  els.grid.replaceChildren(
+    h('section.stat-hero',
+      h('div',
+        h('div.stat-caption', `近 ${range} 天的阅读时长`),
+        h('div.stat-big', hours > 0 && [String(hours), h('small', '小时')], String(minutes), h('small', '分'))),
+      seg),
+    h('section.stat-facts',
+      fact(perDay.filter(Boolean).length, '天', '有阅读的天数'),
+      fact(ranked.length, '本', '读过的书'),
+      fact(marks, '条', '书签与笔记')),
+    h('section.stat-card', h('h2', range <= 30 ? '每天读了多久' : range === 90 ? '每周读了多久' : '每月读了多久'), bars(buckets, peak, buckets.length > 14 ? '.is-dense' : '')),
+    h('section.stat-card', h('h2', '一周里哪天读得多'), bars(week, weekPeak)),
+    h('section.stat-card', h('h2', '每本书读了多久'),
+      ranked.length ? h('div.stat-books', ranked.slice(0, 30).map(([id, sec]) => h('button.stat-book', {
+        type: 'button', title: '打开这本书', onclick: () => { location.hash = '#/read/' + id; },
+      },
+      h('span.stat-book-title', store.seriesLabel(state.books[id])),
+      h('span.stat-book-time', fmtDuration(sec)),
+      h('span.stat-book-bar', h('span', { style: `width:${Math.max(2, (sec / ranked[0][1]) * 100)}%` })))))
+        : h('p.stat-empty', '这段时间还没有阅读记录。打开一本书读一会儿，这里就会有数据。')),
+  );
+}
+
 function renderGrid() {
+  if (view.filter === 'stats') { renderStats(); return; }
   const list = visibleBooks();
   if (list.length) {
     els.grid.className = 'grid';
     // 浏览时把同系列的书叠成一本；搜索、多选和系列页里逐本显示
-    const stacking = prefs.get('stack', true) && !view.selecting && !view.query && !isSeries(view.filter);
+    const stacking = prefs.get('stack', true) && !view.query && !isSeries(view.filter);
     const groups = new Map();
     if (stacking) for (const b of list) if (b.series) groups.set(b.series, [...(groups.get(b.series) || []), b]);
     const done = new Set();
@@ -328,7 +404,7 @@ function renderBar() {
     h('div.select-actions',
       act('加入合集', pickCollections, '.is-primary'),
       inCollection && act('移出本合集', removeFromCurrent),
-      n === 1 ? act('修改信息', ([id]) => editBook(id)) : act('设为系列', setSeries),
+      n === 1 ? act('信息与书评', ([id]) => editBook(id)) : act('设为系列', setSeries),
       act('标记状态', setStatus),
       ids.some((id) => !state.downloaded.has(id)) && act('下载到本机', downloadBooks),
       ids.some((id) => state.downloaded.has(id)) && act('移除本机副本', removeCopies),
@@ -452,7 +528,7 @@ function setSeries(ids) {
     };
     return h('form.dialog-body', { onsubmit: (e) => { e.preventDefault(); if (name.value.trim()) apply(name.value.trim()); } },
       h('label.field-label', '系列的名字'), name,
-      h('p.field-hint', `这 ${books.length} 本书会按书名里的数字编卷号；书名里没有数字的，按书名顺序从 1 开始。编错的可以单选一本，在“修改信息”里改。`),
+      h('p.field-hint', `这 ${books.length} 本书会按书名里的数字编卷号；书名里没有数字的，按书名顺序从 1 开始。编错的可以单选一本，在“信息与书评”里改。`),
       h('div.dialog-actions',
         books.some((b) => b.series) && h('button.btn.is-danger', { type: 'button', onclick: () => apply('') }, '取消系列'),
         h('button.btn', { type: 'button', onclick: () => close() }, '取消'),
@@ -468,10 +544,19 @@ async function deleteBooks(ids) {
 }
 function editBook(id) {
   const book = state.books[id];
-  return dialog('修改信息', (close) => {
+  return dialog('书籍信息', (close) => {
     const title = h('input.field', { type: 'text', value: book.title, maxLength: 200, required: true });
     const author = h('input.field', { type: 'text', value: book.author, maxLength: 200 });
     const illustrator = h('input.field', { type: 'text', value: book.illustrator || '', maxLength: 200 });
+    const publisher = h('input.field', { type: 'text', value: book.publisher || '', maxLength: 200, placeholder: '例如：电击文库' });
+    const review = h('textarea.field.is-area', { value: book.review || '', maxLength: 5000, rows: 4, placeholder: '读完有什么想说的？' });
+    let rating = book.rating || 0;
+    const stars = h('div.stars', { role: 'group', 'aria-label': '评分' });
+    const drawStars = () => stars.replaceChildren(...[1, 2, 3, 4, 5].map((n) => h('button' + (n <= rating ? '.is-on' : ''), {
+      type: 'button', 'aria-label': `${n} 星`, 'aria-pressed': String(n <= rating), onclick: () => { rating = rating === n ? 0 : n; drawStars(); },
+    }, icon(n <= rating ? 'starOn' : 'star', 26))));
+    drawStars();
+    const read = store.secondsOf(id), markCount = store.marksOf(id).length;
     let status = book.status || '';
     const statusSeg = h('div.segmented', { role: 'group', 'aria-label': '阅读状态' });
     const drawStatus = () => statusSeg.replaceChildren(...STATUSES.map(([value, label]) => h('button' + (status === value ? '.is-on' : ''), {
@@ -485,7 +570,8 @@ function editBook(id) {
       onsubmit: async (e) => {
         e.preventDefault();
         const patch = {
-          title: title.value, author: author.value, illustrator: illustrator.value.trim(), status,
+          title: title.value, author: author.value, illustrator: illustrator.value.trim(), publisher: publisher.value.trim(), status,
+          rating, review: review.value.trim(),
           series: series.value.trim(), volume: volume.value === '' ? null : Number(volume.value),
         };
         if (await guard(() => store.updateBook(id, patch), '已保存')) { close(); exitSelect(); }
@@ -495,12 +581,16 @@ function editBook(id) {
     h('div.field-pair.is-even',
       h('div', h('label.field-label', '作者'), author),
       h('div', h('label.field-label', '插画'), illustrator)),
+    h('label.field-label', '出版社'), publisher,
     h('label.field-label', '阅读状态'), statusSeg,
     h('div.field-pair',
       h('div', h('label.field-label', '系列'), series),
       h('div', h('label.field-label', '卷号'), volume)),
     h('datalist', { id: 'series-names' }, names.map((n) => h('option', { value: n }))),
     h('p.field-hint', '填了系列和卷号，书架上会显示成“系列名 + 卷号”，同系列的书会叠在一起并按卷号排序。'),
+    h('label.field-label', '我的评分'), stars,
+    h('label.field-label', '书评'), review,
+    h('p.field-hint', `累计阅读 ${fmtDuration(read)}，${markCount} 条书签与笔记。`),
     h('div.dialog-actions',
       h('button.btn', { type: 'button', onclick: () => close() }, '取消'),
       h('button.btn.is-primary', { type: 'submit' }, '保存')));
@@ -620,7 +710,7 @@ function leaveReader() {
 async function route() {
   const token = ++routeToken;
   const m = /^#\/read\/([a-f0-9]+)$/.exec(location.hash);
-  if (reader) { const r = reader; reader = null; await r.destroy(); store.flushNow(); }
+  if (reader) { const r = reader; reader = null; store.stopReading(); await r.destroy(); store.flushNow(); }
   if (!m || !store.isConfigured()) {
     readerHost.hidden = true; readerHost.replaceChildren(); app.hidden = false;
     document.title = 'スス子文庫';
@@ -652,6 +742,7 @@ async function route() {
     const opened = await mod.open({ host: readerHost, book, title: store.seriesLabel(book), source: handle.source, progress, onExit: leaveReader });
     if (token !== routeToken) { opened.destroy(); handle.release(); return; }
     reader = { destroy: async () => { await opened.destroy(); handle.release(); } };
+    store.startReading(book.id);
     if (progress && progress.percent > 0 && progress.device && progress.device !== store.deviceName()) {
       toast(`已接上「${progress.device}」的进度 ${fmtPercent(progress.percent)}`);
     }

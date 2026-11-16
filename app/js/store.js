@@ -58,10 +58,14 @@ const local = {
 // ---------- 状态 ----------
 export const state = {
   books: {}, collections: {}, progress: {},
+  marks: {}, // 书签与笔记：bookId -> { markId: mark }
+  stats: {}, // 阅读时长：'YYYY-MM-DD' -> { bookId: 秒 }
   downloaded: new Set(), // 已缓存到本机的书
   online: false, syncing: false, lastSync: 0,
 };
 let pending = {}; // 还没推到服务器的进度
+let pendingMarks = []; // 还没推到服务器的记号操作 { op: 'put' | 'del', bookId, id, mark }
+let pendingStats = []; // 还没上报的阅读时长 { day, book, seconds }
 const listeners = new Set();
 export const onChange = (fn) => { listeners.add(fn); return () => listeners.delete(fn); };
 let emitQueued = false;
@@ -71,8 +75,11 @@ function emit() {
   queueMicrotask(() => { emitQueued = false; for (const fn of listeners) fn(); });
 }
 
-const persist = () => local.put('kv', 'state', { books: state.books, collections: state.collections, progress: state.progress }).catch(() => {});
+const persist = () => local.put('kv', 'state', {
+  books: state.books, collections: state.collections, progress: state.progress, marks: state.marks, stats: state.stats,
+}).catch(() => {});
 const persistPending = () => local.put('kv', 'pending', pending).catch(() => {});
+const persistQueues = () => local.put('kv', 'queues', { marks: pendingMarks, stats: pendingStats }).catch(() => {});
 
 export function server() { return prefs.get('server', null); } // { url, key }
 export const isConfigured = () => !!server();
@@ -116,8 +123,8 @@ export async function connect(url, key) {
 export async function disconnect() {
   prefs.remove('server');
   await Promise.all(['files', 'covers', 'kv'].map((s) => local.clear(s)));
-  Object.assign(state, { books: {}, collections: {}, progress: {}, downloaded: new Set(), online: false });
-  pending = {};
+  Object.assign(state, { books: {}, collections: {}, progress: {}, marks: {}, stats: {}, downloaded: new Set(), online: false });
+  pending = {}; pendingMarks = []; pendingStats = [];
   for (const u of coverUrls.values()) URL.revokeObjectURL(u);
   coverUrls.clear();
   emit();
@@ -125,9 +132,11 @@ export async function disconnect() {
 
 export async function init() {
   try {
-    const [cached, pend, keys] = await Promise.all([local.get('kv', 'state'), local.get('kv', 'pending'), local.keys('files')]);
-    if (cached) Object.assign(state, cached);
+    const [cached, pend, keys, queues] = await Promise.all([
+      local.get('kv', 'state'), local.get('kv', 'pending'), local.keys('files'), local.get('kv', 'queues')]);
+    if (cached) Object.assign(state, { marks: {}, stats: {}, ...cached });
     pending = pend || {};
+    pendingMarks = queues?.marks || []; pendingStats = queues?.stats || [];
     for (const [id, p] of Object.entries(pending)) state.progress[id] = p;
     state.downloaded = new Set(keys);
   } catch { /* 本地存储不可用时只能在线使用 */ }
@@ -145,8 +154,12 @@ async function doSync() {
   state.syncing = true; emit();
   try {
     await flushProgress();
+    await flushQueues();
     const remote = await (await api('/api/state')).json();
     state.books = remote.books; state.collections = remote.collections;
+    state.marks = remote.marks || {}; state.stats = remote.stats || {};
+    for (const op of pendingMarks) applyMark(op); // 还没推上去的本地改动继续保留
+    for (const it of pendingStats) bumpStat(it);
     const progress = remote.progress;
     for (const [id, p] of Object.entries(pending)) { // 本地更新的进度不被旧数据覆盖
       if (!progress[id] || p.updatedAt > progress[id].updatedAt) progress[id] = p;
@@ -180,8 +193,94 @@ async function flushProgress() {
   await persistPending();
 }
 
+// ---------- 书签与笔记 ----------
+function applyMark(op) {
+  const list = state.marks[op.bookId] || (state.marks[op.bookId] = {});
+  if (op.op === 'del') delete list[op.id]; else list[op.id] = op.mark;
+}
+function bumpStat({ day, book, seconds }) {
+  const d = state.stats[day] || (state.stats[day] = {});
+  d[book] = (d[book] || 0) + seconds;
+}
+async function flushQueues() {
+  while (pendingMarks.length) {
+    const op = pendingMarks[0];
+    try {
+      if (op.op === 'del') await apiJson(`/api/marks/${op.bookId}/${op.id}`, 'DELETE');
+      else await apiJson(`/api/marks/${op.bookId}/${op.id}`, 'PUT', op.mark);
+    } catch (e) { if (!(e.status >= 400 && e.status < 500)) throw e; } // 书已删等情况：丢弃这条
+    pendingMarks.shift();
+  }
+  if (pendingStats.length) {
+    const batch = pendingStats.slice();
+    await apiJson('/api/stats', 'POST', { add: batch });
+    pendingStats = pendingStats.slice(batch.length);
+  }
+  persistQueues();
+}
+let queueTimer = null;
+function flushQueuesSoon(ms = 1500) {
+  clearTimeout(queueTimer);
+  queueTimer = setTimeout(() => flushQueues().catch(() => {}), ms);
+}
+const newMarkId = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
+
+/** 新建或修改一条记号。mark: { id?, type: 'bookmark' | 'note', loc, percent, chapter, excerpt, text } */
+export function saveMark(bookId, mark) {
+  const full = { createdAt: Date.now(), text: '', excerpt: '', chapter: '', ...mark, id: mark.id || newMarkId(), updatedAt: Date.now() };
+  const op = { op: 'put', bookId, id: full.id, mark: full };
+  applyMark(op); pendingMarks.push(op);
+  persist(); persistQueues(); emit(); flushQueuesSoon();
+  return full;
+}
+export function removeMark(bookId, id) {
+  const op = { op: 'del', bookId, id };
+  applyMark(op); pendingMarks.push(op);
+  persist(); persistQueues(); emit(); flushQueuesSoon();
+}
+export const marksOf = (bookId) => Object.values(state.marks[bookId] || {}).sort((a, b) => a.percent - b.percent || a.createdAt - b.createdAt);
+
+// ---------- 阅读时长 ----------
+// 只在“书开着、窗口可见、三分钟内有翻页或操作”时计时，每 5 秒记一笔。
+let reading = null, lastActivity = 0;
+export const touchActivity = () => { lastActivity = Date.now(); };
+export function dayKey(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function commitReading() {
+  if (!reading || reading.acc < 1) return;
+  const it = { day: dayKey(), book: reading.bookId, seconds: Math.round(reading.acc) };
+  reading.acc = 0;
+  bumpStat(it); pendingStats.push(it);
+  persist(); persistQueues();
+}
+export function startReading(bookId) {
+  stopReading();
+  touchActivity();
+  reading = { bookId, acc: 0, ticks: 0 };
+  reading.timer = setInterval(() => {
+    if (!document.hidden && Date.now() - lastActivity < 180000) reading.acc += 5;
+    if (++reading.ticks % 6 === 0) { commitReading(); flushQueuesSoon(100); }
+  }, 5000);
+}
+export function stopReading() {
+  if (!reading) return;
+  clearInterval(reading.timer);
+  commitReading();
+  reading = null;
+  flushQueuesSoon(100); emit();
+}
+for (const type of ['pointerdown', 'keydown', 'wheel']) window.addEventListener(type, touchActivity, { passive: true, capture: true });
+/** 某本书累计读了多少秒 */
+export function secondsOf(bookId) {
+  let n = 0;
+  for (const day of Object.values(state.stats)) n += day[bookId] || 0;
+  return n;
+}
+
 let flushTimer = null;
 export function setProgress(bookId, loc, percent) {
+  touchActivity();
   const p = { loc, percent, updatedAt: Date.now(), device: deviceName() };
   state.progress[bookId] = p;
   pending[bookId] = p;
@@ -194,7 +293,7 @@ export function flushNow() {
   if (!Object.keys(pending).length) return Promise.resolve();
   return flushProgress().catch(() => {});
 }
-document.addEventListener('visibilitychange', () => { if (document.hidden) flushNow(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { commitReading(); flushNow(); flushQueuesSoon(0); } });
 
 /** 打开书之前拉一次这本书在别的设备上的最新进度 */
 export async function freshProgress(bookId) {
@@ -391,7 +490,7 @@ async function inspect(file) {
     const cover = await epub.coverBlob().catch(() => null);
     const title = epub.title || name;
     const guess = epub.series ? { series: epub.series, volume: epub.volume } : guessSeries(title);
-    return { format: 'epub', title, author: epub.author, illustrator: epub.illustrator, cover, ...guess };
+    return { format: 'epub', title, author: epub.author, illustrator: epub.illustrator, publisher: epub.publisher, cover, ...guess };
   }
   if (ext === 'cbz' || ext === 'zip') {
     const zip = await ZipReader.open(file);
@@ -407,7 +506,7 @@ export async function importBook(file, collectionIds = []) {
   const info = await inspect(file);
   const q = new URLSearchParams({
     format: info.format, title: info.title, author: info.author, name: file.name, collections: collectionIds.join(','),
-    series: info.series || '', volume: info.volume ?? '', illustrator: info.illustrator || '',
+    series: info.series || '', volume: info.volume ?? '', illustrator: info.illustrator || '', publisher: info.publisher || '',
   });
   const { book, duplicate } = await (await api('/api/books?' + q, { method: 'POST', body: file })).json();
   let saved = book;
@@ -430,7 +529,7 @@ export async function updateBook(id, patch) {
 }
 export async function deleteBook(id) {
   await apiJson('/api/books/' + id, 'DELETE');
-  delete state.books[id]; delete state.progress[id]; delete pending[id];
+  delete state.books[id]; delete state.progress[id]; delete pending[id]; delete state.marks[id];
   state.downloaded.delete(id);
   local.del('files', id).catch(() => {}); local.del('covers', id).catch(() => {});
   persist(); emit();

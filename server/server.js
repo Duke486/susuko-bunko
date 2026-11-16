@@ -15,7 +15,7 @@ const KEY = process.env.SHIORI_KEY || '';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const APP_DIR = path.resolve(process.env.APP_DIR || path.join(__dirname, '..', 'app'));
 const MAX_BOOK_BYTES = Number(process.env.MAX_BOOK_MB || 2048) * 1024 * 1024;
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 
 if (!KEY || KEY.length < 8) {
   console.error('请先设置访问密钥（至少 8 位）：SHIORI_KEY=xxxxxxxx node server.js');
@@ -28,7 +28,7 @@ const DB_FILE = path.join(DATA_DIR, 'db.json');
 for (const d of [DATA_DIR, BOOKS_DIR, COVERS_DIR]) fs.mkdirSync(d, { recursive: true });
 
 // ---------- 数据库（一个 JSON 文件，原子写入） ----------
-let db = { books: {}, collections: {}, progress: {} };
+let db = { books: {}, collections: {}, progress: {}, marks: {}, stats: {} };
 if (fs.existsSync(DB_FILE)) {
   db = Object.assign(db, JSON.parse(fs.readFileSync(DB_FILE, 'utf8')));
 }
@@ -164,7 +164,8 @@ async function uploadBook(req, res, q) {
     id, format, size, sha256: sha,
     title: str(q.get('title')) || str(q.get('name')) || '未命名',
     author: str(q.get('author')),
-    illustrator: str(q.get('illustrator'), 200), status: '',
+    illustrator: str(q.get('illustrator'), 200), publisher: str(q.get('publisher'), 200), status: '',
+    rating: 0, review: '',
     series: str(q.get('series'), 200), volume: volumeOf(q.get('volume')),
     fileName: str(q.get('name')),
     collections: cols, hasCover: false, addedAt: now, updatedAt: now,
@@ -192,6 +193,9 @@ async function api(req, res, url) {
       if (typeof body.title === 'string' && str(body.title)) book.title = str(body.title);
       if (typeof body.author === 'string') book.author = str(body.author);
       if (typeof body.illustrator === 'string') book.illustrator = str(body.illustrator, 200);
+      if (typeof body.publisher === 'string') book.publisher = str(body.publisher, 200);
+      if (Number.isInteger(body.rating) && body.rating >= 0 && body.rating <= 5) book.rating = body.rating; // 0 = 没评分
+      if (typeof body.review === 'string') book.review = str(body.review, 5000);
       if (['', 'reading', 'finished'].includes(body.status)) book.status = body.status; // 空 = 按进度自动判断
       if (typeof body.series === 'string') book.series = str(body.series, 200);
       if ('volume' in body) book.volume = volumeOf(body.volume);
@@ -201,7 +205,7 @@ async function api(req, res, url) {
       return json(res, 200, { book });
     }
     if (seg.length === 2 && M === 'DELETE') {
-      delete db.books[book.id]; delete db.progress[book.id]; save();
+      delete db.books[book.id]; delete db.progress[book.id]; delete db.marks[book.id]; save();
       await fsp.rm(bookFile(book), { force: true });
       await fsp.rm(coverFile(book.id), { force: true });
       return json(res, 200, { ok: true });
@@ -262,6 +266,40 @@ async function api(req, res, url) {
     const cur = db.progress[seg[1]];
     if (!cur || incoming.updatedAt >= cur.updatedAt) { db.progress[seg[1]] = incoming; save(); } // 以最新时间为准
     return json(res, 200, { progress: db.progress[seg[1]] });
+  }
+
+  // 书签与笔记：每条记号由客户端生成 id，整条覆盖写入
+  if (seg[0] === 'marks' && seg.length === 3 && /^[a-f0-9]{8,32}$/.test(seg[2])) {
+    if (!db.books[seg[1]]) return fail(res, 404, '没有这本书');
+    const list = db.marks[seg[1]] || (db.marks[seg[1]] = {});
+    if (M === 'PUT') {
+      const body = await readJson(req);
+      const mark = {
+        id: seg[2], type: body.type === 'note' ? 'note' : 'bookmark',
+        loc: body.loc && typeof body.loc === 'object' ? body.loc : {},
+        percent: Math.min(1, Math.max(0, Number(body.percent) || 0)),
+        chapter: str(body.chapter, 200), excerpt: str(body.excerpt, 300), text: str(body.text, 5000),
+        createdAt: Number(body.createdAt) || Date.now(), updatedAt: Date.now(),
+      };
+      if (JSON.stringify(mark.loc).length > 2000) return fail(res, 400, '位置数据过大');
+      if (!list[mark.id] && Object.keys(list).length >= 2000) return fail(res, 400, '这本书的记号太多了');
+      list[mark.id] = mark; save();
+      return json(res, 200, { mark });
+    }
+    if (M === 'DELETE') { delete list[seg[2]]; save(); return json(res, 200, { ok: true }); }
+  }
+
+  // 阅读时长：客户端上报增量，服务器按“日期 → 书”累加，多台设备不会互相覆盖
+  if (seg[0] === 'stats' && seg.length === 1 && M === 'POST') {
+    const body = await readJson(req);
+    for (const it of Array.isArray(body.add) ? body.add.slice(0, 500) : []) {
+      const seconds = Math.round(Number(it.seconds));
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(it.day) || !db.books[it.book] || !(seconds > 0) || seconds > 86400) continue;
+      const day = db.stats[it.day] || (db.stats[it.day] = {});
+      day[it.book] = Math.min(86400, (day[it.book] || 0) + seconds);
+    }
+    save();
+    return json(res, 200, { ok: true });
   }
 
   fail(res, 404, '接口不存在');

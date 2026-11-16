@@ -48,6 +48,7 @@ export class Epub {
     this.author = people.filter((x) => x.creator && x.role !== 'ill').map((x) => x.name).join('、');
     this.illustrator = people.filter((x) => x.role === 'ill').map((x) => x.name).join('、');
     this.language = text('language');
+    this.publisher = text('publisher');
     // 系列与卷号：Calibre 写法或 EPUB3 的 belongs-to-collection
     const metas = byTag(opf, 'meta');
     const named = (n) => metas.find((m) => m.getAttribute('name') === n)?.getAttribute('content') || '';

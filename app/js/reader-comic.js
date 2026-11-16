@@ -1,7 +1,7 @@
 // 漫画阅读器：CBZ / ZIP。翻页（可日漫右翻、宽屏双页）或下拉长条。
 import { ZipReader, mimeOf, isImageName } from './zip.js';
 import { prefs, setProgress, natural } from './store.js';
-import { h, icon, toast, menuButton } from './ui.js';
+import { h, icon, toast, menuButton, statusClock } from './ui.js';
 
 const DEFAULTS = { mode: 'page', rtl: true, spread: true };
 
@@ -35,13 +35,14 @@ export async function open({ host, book, title = book.title, source, progress, o
   const fill = () => slider.style.setProperty('--v', `${total > 1 ? ((slider.value - 1) / (total - 1)) * 100 : 100}%`);
   const sheet = h('div.reader-sheet', { hidden: true });
   const scrim = h('div.reader-scrim', { hidden: true, onclick: closePanels });
+  const clock = statusClock();
   const modeBtn = menuButton('scroll', '下拉', () => { toggleChrome(false); change({ mode: settings.mode === 'scroll' ? 'page' : 'scroll' }); });
   const drawModeBtn = () => modeBtn.replaceChildren(
     icon(settings.mode === 'scroll' ? 'pages' : 'scroll', 22), h('span', settings.mode === 'scroll' ? '改为翻页' : '改为下拉'));
   drawModeBtn();
   const root = h('div.reader.is-comic', { 'data-dark': 'true' },
     stage,
-    h('footer.reader-foot', h('span.foot-chapter', title), footRight),
+    h('footer.reader-foot', clock.el, h('span.foot-chapter', title), footRight),
     h('header.reader-top',
       h('button.icon-btn', { type: 'button', 'aria-label': '返回书架', onclick: onExit }, icon('back')),
       h('div.reader-heading', h('span.reader-title', title), topSub)),
@@ -228,6 +229,11 @@ export async function open({ host, book, title = book.title, source, progress, o
     if (viewApi.onKey(e.key)) e.preventDefault();
   }
   window.addEventListener('keydown', onKey);
+  // 安卓音量键翻页
+  const onVolume = (e) => { if (scrim.hidden) viewApi.onKey(e.detail === 'down' ? 'PageDown' : 'PageUp'); };
+  const volumeOn = prefs.get('reader', {}).volumeKeys !== false;
+  window.addEventListener('volumekey', onVolume);
+  try { window.SusukoNative?.setVolumeKeys(volumeOn); } catch { /* 网页版没有原生层 */ }
   slider.addEventListener('input', () => { sliderLabel.textContent = `${slider.value} / ${total}`; fill(); });
   slider.addEventListener('change', () => viewApi.goto(Number(slider.value) - 1));
 
@@ -246,7 +252,10 @@ export async function open({ host, book, title = book.title, source, progress, o
       rows.push(seg('翻页方向', 'rtl', [[true, '从右到左（日漫）'], [false, '从左到右']]),
         seg('宽屏双页', 'spread', [[true, '开'], [false, '关']]));
     }
-    sheet.replaceChildren(...rows);
+    sheet.replaceChildren(
+      h('div.sheet-head', h('h2', '阅读设置'),
+        h('button.icon-btn', { type: 'button', 'aria-label': '关闭', onclick: closePanels }, icon('close'))),
+      h('div.sheet-body', rows));
   }
 
   mount(false);
@@ -254,8 +263,10 @@ export async function open({ host, book, title = book.title, source, progress, o
   return {
     async destroy() {
       destroyed = true;
-      cleanupView();
+      cleanupView(); clock.stop();
       window.removeEventListener('keydown', onKey);
+      window.removeEventListener('volumekey', onVolume);
+      try { window.SusukoNative?.setVolumeKeys(false); } catch { /* 忽略 */ }
       root.remove();
       evict(-1e9, 0);
     },

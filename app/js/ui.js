@@ -38,6 +38,14 @@ const paths = {
   down: '<path d="M12 4v12M7 11.5l5 5 5-5M5 20h14"/>',
   prev: '<path d="M14.5 6l-6 6 6 6"/>',
   next: '<path d="M9.5 6l6 6-6 6"/>',
+  chevron: '<path d="M7 10l5 5 5-5"/>',
+  chart: '<path d="M5 20V11M12 20V5M19 20v-6"/>',
+  bookmark: '<path d="M7 4h10v16l-5-4-5 4z"/>',
+  bookmarkOn: '<path d="M7 4h10v16l-5-4-5 4z" fill="currentColor"/>',
+  pen: '<path d="M4 20l1-4L16.5 4.5l3 3L8 19zM14 7l3 3"/>',
+  trash: '<path d="M5 7h14M10 7V4.5h4V7M7 7l1 13h8l1-13M10 11v5M14 11v5"/>',
+  star: '<path d="M12 3.8l2.5 5.2 5.7.8-4.1 4 1 5.6-5.1-2.7-5.1 2.7 1-5.6-4.1-4 5.7-.8z"/>',
+  starOn: '<path d="M12 3.8l2.5 5.2 5.7.8-4.1 4 1 5.6-5.1-2.7-5.1 2.7 1-5.6-4.1-4 5.7-.8z" fill="currentColor"/>',
   moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/>',
   scroll: '<rect x="6" y="3" width="12" height="18" rx="2"/><path d="M12 8v8M9.5 13.5L12 16l2.5-2.5"/>',
@@ -181,4 +189,59 @@ export function imageViewer(src) {
   root.addEventListener('wheel', (e) => { e.preventDefault(); zoomAt(e.clientX, e.clientY, scale * (e.deltaY < 0 ? 1.2 : 1 / 1.2)); }, { passive: false });
   document.body.append(root);
   return { close };
+}
+
+/** 自绘下拉菜单（代替系统原生的 select）。options: [[value, 文字], ...] */
+export function dropdown({ label, value, options, onChange }) {
+  const text = h('span');
+  const btn = h('button.dropdown-btn', { type: 'button', 'aria-haspopup': 'listbox', 'aria-label': label }, text, icon('chevron', 16));
+  const root = h('div.dropdown', btn);
+  let menu = null;
+  const draw = () => { text.textContent = options.find(([v]) => v === value)?.[1] ?? ''; };
+  const close = () => {
+    if (!menu) return;
+    menu.remove(); menu = null; btn.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', onKey, true);
+  };
+  const outside = (e) => { if (!root.contains(e.target)) close(); };
+  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); btn.focus(); } };
+  btn.addEventListener('click', () => {
+    if (menu) { close(); return; }
+    menu = h('div.dropdown-menu', { role: 'listbox', 'aria-label': label }, options.map(([v, t]) => h('button.dropdown-item' + (v === value ? '.is-on' : ''), {
+      type: 'button', role: 'option', 'aria-selected': String(v === value),
+      onclick: () => { value = v; draw(); close(); onChange(v); },
+    }, h('span', t), v === value && icon('check', 16))));
+    root.append(menu); btn.setAttribute('aria-expanded', 'true');
+    document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', onKey, true);
+  });
+  draw();
+  return root;
+}
+
+export function fmtDuration(seconds) {
+  const m = Math.round(seconds / 60);
+  if (m < 1) return seconds > 0 ? '不到 1 分钟' : '0 分钟';
+  return m >= 60 ? `${Math.floor(m / 60)} 小时 ${m % 60} 分` : `${m} 分钟`;
+}
+
+/** 页脚左下角的电量图标 + 当前时间。返回 { el, stop } */
+export function statusClock() {
+  const fill = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+  const battery = h('span.battery', { hidden: true, html: '<svg width="24" height="12" viewBox="0 0 24 12" aria-hidden="true"><rect x=".75" y=".75" width="19.5" height="10.5" rx="2.6" fill="none" stroke="currentColor" stroke-width="1.2"/><rect x="21.6" y="3.6" width="1.9" height="4.8" rx=".9" fill="currentColor"/></svg>' });
+  for (const [k, v] of Object.entries({ x: 2.4, y: 2.4, height: 7.2, rx: 1.3, fill: 'currentColor' })) fill.setAttribute(k, v);
+  battery.firstChild.append(fill);
+  const time = h('span.clock');
+  const el = h('span.foot-status', battery, time);
+  const tick = () => { const d = new Date(); time.textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+  tick();
+  const timer = setInterval(tick, 15000);
+  let source = null;
+  const level = () => {
+    battery.hidden = false;
+    fill.setAttribute('width', (16.2 * source.level).toFixed(1));
+    battery.title = `电量 ${Math.round(source.level * 100)}%${source.charging ? '，充电中' : ''}`;
+    battery.classList.toggle('is-low', source.level <= 0.2 && !source.charging);
+  };
+  navigator.getBattery?.().then((b) => { source = b; level(); b.addEventListener('levelchange', level); b.addEventListener('chargingchange', level); }).catch(() => {});
+  return { el, stop() { clearInterval(timer); source?.removeEventListener('levelchange', level); source?.removeEventListener('chargingchange', level); } };
 }
