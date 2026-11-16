@@ -3,6 +3,11 @@ import * as store from './store.js';
 import { state, prefs } from './store.js';
 import { h, icon, toast, dialog, confirmDialog, promptDialog, dropdown, fmtPercent, fmtSize, fmtDuration } from './ui.js';
 import * as ai from './ai.js';
+import * as theme from './theme.js';
+import { mountShelf } from './shelf3d.js';
+
+// 0.6 起立体书架是默认的书架视图（旧的“书脊”视图并入了它）
+if (prefs.get('layout') === 'spine' || !prefs.get('layoutV')) { prefs.set('layout', 'shelf'); prefs.set('layoutV', 1); }
 
 const app = document.getElementById('app');
 const readerHost = document.getElementById('reader');
@@ -10,7 +15,7 @@ const readerHost = document.getElementById('reader');
 const view = {
   filter: prefs.get('filter', 'all'), // all | reading | finished | none | <合集 id> | series:<名> | stats | excerpts | settings
   sort: prefs.get('sort', 'recent'),
-  layout: prefs.get('layout', 'grid'), // grid | list | spine
+  layout: prefs.get('layout', 'shelf'), // shelf | grid | list
   query: '',
   selecting: false,
   selected: new Set(),
@@ -25,6 +30,7 @@ export function applyTheme() {
   const t = prefs.get('theme', 'auto');
   const dark = t === 'dark' || (t === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  theme.applyAccent(); // 主题色的深浅两套跟着切换
   // Windows 客户端：让系统的云母材质跟着应用的深浅色走
   try { window.__TAURI__?.window?.getCurrentWindow?.().setTheme(t === 'auto' ? null : t)?.catch?.(() => {}); } catch { /* 网页版没有这个接口 */ }
 }
@@ -280,7 +286,7 @@ function renderTools() {
     renderSync();
     return;
   }
-  els.layoutSeg.replaceChildren(...[['grid', 'gridView', '封面'], ['list', 'listView', '列表'], ['spine', 'spineView', '书脊']].map(([v, ic, label]) => h('button' + (view.layout === v ? '.is-on' : ''), {
+  els.layoutSeg.replaceChildren(...[['shelf', 'spineView', '立体书架'], ['grid', 'gridView', '封面'], ['list', 'listView', '列表']].map(([v, ic, label]) => h('button' + (view.layout === v ? '.is-on' : ''), {
     type: 'button', 'aria-label': `${label}视图`, title: `${label}视图`, 'aria-pressed': String(view.layout === v), onclick: () => setLayout(v),
   }, icon(ic, 18))));
   const label = view.selecting ? '完成选择' : '选择';
@@ -292,6 +298,8 @@ function renderTools() {
 
 function renderBody() {
   const f = view.filter;
+  const shelfNow = !isPage(f) && view.layout === 'shelf' && !view.selecting && visibleBooks().length > 0;
+  if (els.shelf && !shelfNow) { els.shelf.api.destroy(); els.shelf = null; }
   els.body.className = 'body';
   if (f === 'stats') return renderStats();
   if (f === 'excerpts') return renderExcerpts();
@@ -299,7 +307,7 @@ function renderBody() {
   const list = visibleBooks();
   if (!list.length) return renderEmpty();
   if (view.layout === 'list') return renderList(list);
-  if (view.layout === 'spine' && !view.selecting) return renderSpines(list);
+  if (view.layout === 'shelf' && !view.selecting) return renderShelf3d(list);
   return renderGrid(list);
 }
 
@@ -460,49 +468,62 @@ function renderList(list) {
   els.body.replaceChildren(...rows);
 }
 
-// 书脊视图：一排竖着的书脊，选中的那本抽出来露出封面，右边是详情
-function renderSpines(list) {
-  els.body.className = 'body spines';
-  view.spineIndex = Math.min(Math.max(0, view.spineIndex), list.length - 1);
-  const cur = list[view.spineIndex];
-  const go = (i) => { view.spineIndex = (i + list.length) % list.length; renderBody(); };
-  const row = h('div.spine-row', { role: 'listbox', 'aria-label': '书脊', tabIndex: 0,
-    onkeydown: (e) => { if (e.key === 'ArrowRight') go(view.spineIndex + 1); else if (e.key === 'ArrowLeft') go(view.spineIndex - 1); else if (e.key === 'Enter') openBook(cur.id); },
-  }, list.map((b, i) => {
-    const on = i === view.spineIndex;
-    const hue = fallbackHue(b.series || b.title);
-    const el = h('button.spine' + (on ? '.is-on' : ''), {
-      type: 'button', role: 'option', 'aria-selected': String(on), title: b.title, style: `--hue:${hue};--d:${i - view.spineIndex}`,
-      onclick: () => (on ? openBook(b.id) : go(i)),
-    },
-    h('span.spine-no', b.volume != null ? String(b.volume).padStart(2, '0') : String(i + 1).padStart(2, '0')),
-    h('span.spine-title', bookLabel(b)),
-    h('span.spine-dot'));
-    if (on) el.append(h('span.spine-cover', coverOf(b)));
-    return el;
-  }));
-  let wheelAt = 0;
-  row.addEventListener('wheel', (e) => {
-    if (Date.now() - wheelAt < 120) return;
-    const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-    if (Math.abs(d) < 8) return;
-    e.preventDefault(); wheelAt = Date.now(); go(view.spineIndex + Math.sign(d));
-  }, { passive: false });
-  const st = store.statusOf(cur);
-  els.body.replaceChildren(
-    h('div.spine-stage', row),
-    h('div.spine-caption',
-      h('div',
-        h('h2', bookLabel(cur)),
-        h('p', [cur.author, { reading: '在读', finished: '已读完', unread: '未读' }[st]].filter(Boolean).join(' · '))),
-      h('div.spine-nav',
-        h('button.icon-btn', { type: 'button', 'aria-label': '上一本', onclick: () => go(view.spineIndex - 1) }, icon('prev')),
-        h('span', `${String(view.spineIndex + 1).padStart(2, '0')} / ${String(list.length).padStart(2, '0')}`),
-        h('button.icon-btn', { type: 'button', 'aria-label': '下一本', onclick: () => go(view.spineIndex + 1) }, icon('next')))),
-  );
-  requestAnimationFrame(() => row.querySelector('.spine.is-on')?.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' }));
-  // 宽屏时书脊旁边直接显示选中那本的详情
-  if (view.detail !== cur.id && window.innerWidth > 1000 && (!view.detail || view.autoDetail)) { view.detail = cur.id; view.autoDetail = true; renderDetail(); }
+// 立体书架：书本沿弧线摆开，中间那本露出封面，下面是它的信息
+function renderShelf3d(list) {
+  els.body.className = 'body shelf';
+  const items = groupSeries(list).map((g) => {
+    const sorted = g.books ? [...g.books].sort(byVolume) : null;
+    const b = g.book || sorted.find((x) => store.statusOf(x) !== 'finished') || sorted[0];
+    return {
+      key: g.series ? 's:' + g.series : b.id, book: b, group: g,
+      title: g.series || (b.series ? b.series : b.title),
+      volume: g.series ? null : b.series ? b.volume : null,
+      colorKey: `${b.id}:${b.coverAt || 0}`, fallbackHue: fallbackHue(b.series || b.title),
+      reading: store.statusOf(b) === 'reading',
+    };
+  });
+  const keys = items.map((i) => i.key).join('|');
+  if (els.shelf && els.shelf.keys === keys && els.body.contains(els.shelf.stage)) { drawShelfCaption(); return; }
+  els.shelf?.api.destroy();
+  const stage = h('div.shelf-host');
+  const caption = h('div.shelf-caption', { 'aria-live': 'polite' });
+  els.body.replaceChildren(stage, caption);
+  view.spineIndex = Math.min(Math.max(0, view.spineIndex), items.length - 1);
+  els.shelf = { keys, items, stage, caption };
+  els.shelf.api = mountShelf(stage, items, {
+    index: view.spineIndex,
+    coverUrl: (b) => store.coverUrl(b),
+    onFocus: (i) => { view.spineIndex = i; drawShelfCaption(); },
+    onOpen: (i) => openShelfItem(items[i]),
+  });
+}
+function openShelfItem(it) {
+  if (!it) return;
+  if (it.group.series) openSeries(it.group.series); else openBook(it.book.id);
+}
+function drawShelfCaption() {
+  const sh = els.shelf;
+  const it = sh?.items[view.spineIndex];
+  if (!it) return;
+  const b = it.book, total = sh.items.length;
+  const st = store.statusOf(b), p = state.progress[b.id]?.percent || 0;
+  const meta = it.group.series
+    ? [b.author, `共 ${it.group.books.length} 卷`, b.volume != null && st !== 'unread' && `读到第 ${b.volume} 卷`]
+    : [b.author, b.illustrator && `插画 ${b.illustrator}`, { reading: `在读 ${fmtPercent(Math.min(p, 0.99))}`, finished: '已读完', unread: '未读' }[st]];
+  sh.caption.replaceChildren(
+    h('div.cap-index', h('b', String(view.spineIndex + 1).padStart(2, '0')), h('span', `/ ${String(total).padStart(2, '0')}`)),
+    h('div.cap-main',
+      h('h2', it.title + (it.volume != null ? ` ${it.volume}` : '')),
+      h('p', meta.filter(Boolean).join(' · ')),
+      it.group.series ? null : h('div.cap-bar', h('span', { style: `width:${Math.round(Math.min(1, p) * 100)}%` }))),
+    h('div.cap-actions',
+      h('button.icon-btn', { type: 'button', 'aria-label': '上一本', onclick: () => sh.api.prev() }, icon('prev')),
+      h('button.btn.is-primary', { type: 'button', onclick: () => openShelfItem(it) },
+        it.group.series ? '打开系列' : p > 0 ? '继续阅读' : '开始阅读'),
+      !it.group.series && h('button.btn', { type: 'button', onclick: () => showDetail(b.id) }, '详情'),
+      h('button.icon-btn', { type: 'button', 'aria-label': '下一本', onclick: () => sh.api.next() }, icon('next'))));
+  // 宽屏时书架旁边直接显示选中那本的详情
+  if (!it.group.series && view.detail !== b.id && window.innerWidth > 1180 && (!view.detail || view.autoDetail)) { view.detail = b.id; view.autoDetail = true; renderDetail(); }
 }
 
 function renderEmpty() {
@@ -529,6 +550,7 @@ function lastRead() {
   return best;
 }
 function renderPill() {
+  syncCoverAccent();
   const b = !view.selecting && !isPage(view.filter) && lastRead();
   els.pill.hidden = !b;
   if (!b) return;
@@ -1041,12 +1063,63 @@ function changePasswordDialog() {
 
 function settingsLook() {
   const redraw = () => renderBody();
-  return [h('section.set-card',
+  return [themeCard(), h('section.set-card',
     h('h2', '外观'),
     row('界面主题', segOf('界面主题', [['auto', '跟随系统'], ['light', '浅色'], ['dark', '深色']], prefs.get('theme', 'auto'), (v) => { prefs.set('theme', v); applyTheme(); redraw(); })),
-    row('书架的查看方式', segOf('查看方式', [['grid', '封面'], ['list', '列表'], ['spine', '书脊']], view.layout, (v) => { view.layout = v; prefs.set('layout', v); redraw(); })),
+    row('书架的查看方式', segOf('查看方式', [['shelf', '立体书架'], ['grid', '封面'], ['list', '列表']], view.layout, (v) => { view.layout = v; prefs.set('layout', v); redraw(); })),
     row('同系列的书叠成一本', segOf('叠放', [[true, '开'], [false, '关']], prefs.get('stack', true), (v) => { prefs.set('stack', v); redraw(); })),
     row('继续阅读浮条', segOf('浮条', [[true, '显示'], [false, '隐藏']], prefs.get('pill', true), (v) => { prefs.set('pill', v); document.body.classList.toggle('no-pill', !v); redraw(); }), '书架底部显示上次读到的书'))];
+}
+
+// 主题色：预设、自选、图片取色、跟随在读的书
+function themeCard() {
+  const a = theme.accentSettings();
+  const current = a.mode === 'default' ? '' : a.color;
+  const pick = (patch) => { theme.saveAccent(patch); renderBody(); };
+  const drop = (id, name, color, on) => h('button.drop' + (on ? '.is-on' : ''), {
+    type: 'button', 'aria-pressed': String(on), style: color ? `--d:${color}` : '', onclick: () => pick(id === 'default' ? { mode: 'default' } : { mode: 'preset', preset: id, color }),
+  }, h('span.drop-dot' + (color ? '' : '.is-default')), h('span', name));
+  const custom = h('input', { type: 'color', value: current || '#E46F93', 'aria-label': '自选颜色', onchange: (e) => pick({ mode: 'custom', color: e.target.value }) });
+  const fromImage = h('input', { type: 'file', accept: 'image/*', hidden: true, onchange: async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try { pick({ mode: 'image', color: await theme.extractColor(f) }); toast('已从图片取色'); } catch { toast('这张图片读不出来', { error: true }); }
+  } });
+  const sample = lastRead() || Object.values(state.books)[0];
+  return h('section.set-card.theme-card',
+    h('h2', '主题色'),
+    h('p.field-hint', '选一个主色，背景、玻璃、按钮和书架会一起换成和它协调的色调，深色模式下也有对应的一套。阅读页的纸张配色不受影响。'),
+    h('div.theme-preview', { 'aria-hidden': 'true' },
+      h('div.tp-side', h('span.tp-nav.is-on'), h('span.tp-nav'), h('span.tp-nav')),
+      h('div.tp-main',
+        h('div.tp-head', h('b', '全部'), h('span.tp-btn', '导入')),
+        h('div.tp-shelf', [0, 1, 2, 3, 4].map((i) => h('span.tp-book' + (i === 2 ? '.is-center' : ''), { style: `--i:${i - 2}` }))),
+        h('div.tp-pill', h('span.tp-cover'), h('span.tp-lines', h('i'), h('i')), h('span.tp-ring')))),
+    h('div.drops',
+      drop('default', 'スス子', null, a.mode === 'default'),
+      ...theme.PRESETS.map((p) => drop(p.id, p.name, p.color, a.mode === 'preset' && a.preset === p.id))),
+    h('div.theme-more',
+      h('label.btn', icon('palette', 18), '自选颜色', custom),
+      h('button.btn', { type: 'button', onclick: () => fromImage.click() }, icon('camera', 18), '从图片取色'), fromImage,
+      h('button.btn' + (a.mode === 'cover' ? '.is-primary' : ''), {
+        type: 'button', disabled: !sample?.hasCover, title: sample?.hasCover ? '' : '书架上还没有带封面的书',
+        onclick: async () => { if (a.mode === 'cover') { pick({ mode: 'default' }); return; } coverAccentFor = null; await syncCoverAccent(true); renderBody(); },
+      }, icon('dict', 18), a.mode === 'cover' ? '正在跟随在读的书' : '跟随在读的书')),
+    h('p.field-hint', a.mode === 'default' ? '当前：スス子默认配色' : `当前主色 ${current.toUpperCase()}${a.mode === 'cover' ? '，换一本书读时会跟着变' : ''}`));
+}
+/** “跟随在读的书”：用最近在读那本的封面取色 */
+let coverAccentFor = null;
+async function syncCoverAccent(force = false) {
+  if (!force && theme.accentSettings().mode !== 'cover') return;
+  const b = lastRead() || Object.values(state.books).find((x) => x.hasCover);
+  if (!b?.hasCover || coverAccentFor === b.id + ':' + b.coverAt) return;
+  coverAccentFor = b.id + ':' + b.coverAt;
+  try {
+    const url = await store.coverUrl(b);
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    theme.saveAccent({ mode: 'cover', color: await theme.extractColor(img) });
+  } catch { coverAccentFor = null; }
 }
 
 function settingsAi() {
@@ -1239,6 +1312,8 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden && readerHost.hidden && store.isConfigured()) store.sync().catch(() => {});
 });
 window.addEventListener('online', () => store.sync().catch(() => {}));
+// 窗口变窄后，书架旁边自动打开的详情要收起来（手机上它会盖住整个屏幕）
+window.addEventListener('resize', () => { if (view.autoDetail && window.innerWidth <= 1180 && els) hideDetail(); });
 // 阅读器里点“去设置”：回到书架后打开对应的设置页
 window.addEventListener('open-settings', (e) => {
   view.settingsTab = e.detail || 'account';
@@ -1247,8 +1322,8 @@ window.addEventListener('open-settings', (e) => {
 });
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && view.detail && readerHost.hidden && !document.querySelector('dialog[open]')) hideDetail();
-  if (els && readerHost.hidden && view.layout === 'spine' && !isPage(view.filter) && !view.selecting && !e.target.closest?.('input, textarea, select, .spine-row')) {
-    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { view.spineIndex += e.key === 'ArrowRight' ? 1 : -1; const n = visibleBooks().length; view.spineIndex = (view.spineIndex + n) % Math.max(1, n); renderBody(); }
+  if (els?.shelf && readerHost.hidden && !document.querySelector('dialog[open]') && !e.target.closest?.('input, textarea, select, .shelf3d')) {
+    if (e.key === 'ArrowRight') els.shelf.api.next(); else if (e.key === 'ArrowLeft') els.shelf.api.prev();
   }
 });
 (async () => {
