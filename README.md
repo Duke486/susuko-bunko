@@ -1,5 +1,7 @@
 # スス子文庫（Susuko Bunko）
+[![下载 Windows 版](https://img.shields.io/badge/下载-Windows%20版-0078D4?style=for-the-badge&logo=windows)](https://github.com/TimeyearsShine/susuko-bunko/releases/latest/download/SusukoBunko-Setup.exe)
 
+[![下载安卓版](https://img.shields.io/badge/下载-安卓%20APK-3DDC84?style=for-the-badge&logo=android)](https://github.com/TimeyearsShine/susuko-bunko/releases/latest/download/SusukoBunko.apk)
 自托管同步的轻小说 / 漫画阅读器。书、合集和阅读进度都放在你自己的服务器上，Windows、安卓和浏览器看到的是同一个书架。
 
 - **格式**：EPUB（含插画）、CBZ / ZIP 漫画
