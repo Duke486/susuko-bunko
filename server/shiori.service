@@ -9,7 +9,7 @@ After=network.target
 WorkingDirectory=/opt/shiori
 ExecStart=/usr/bin/node server/server.js
 User=www-data
-Environment=SHIORI_KEY=请改成一串足够长的随机密钥
+Environment=SHIORI_KEY=请改成一串足够长的随机邀请码
 Environment=PORT=8787
 Environment=DATA_DIR=/var/lib/shiori
 Restart=on-failure

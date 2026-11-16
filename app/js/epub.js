@@ -49,6 +49,13 @@ export class Epub {
     this.illustrator = people.filter((x) => x.role === 'ill').map((x) => x.name).join('、');
     this.language = text('language');
     this.publisher = text('publisher');
+    // 简介：dc:description 里常常是转义过的 HTML，转成纯文本并保留分段
+    const rawDesc = text('description');
+    if (rawDesc) {
+      const html = rawDesc.replace(/<\s*(br|\/p|\/div|\/li)[^>]*>/gi, '\n');
+      const plain = new DOMParser().parseFromString(html, 'text/html').body.textContent || '';
+      this.description = plain.split('\n').map((l) => l.trim()).filter(Boolean).join('\n').slice(0, 8000);
+    } else this.description = '';
     // 系列与卷号：Calibre 写法或 EPUB3 的 belongs-to-collection
     const metas = byTag(opf, 'meta');
     const named = (n) => metas.find((m) => m.getAttribute('name') === n)?.getAttribute('content') || '';

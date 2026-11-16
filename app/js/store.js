@@ -58,7 +58,7 @@ const local = {
 // ---------- 状态 ----------
 export const state = {
   books: {}, collections: {}, progress: {},
-  marks: {}, // 书签与笔记：bookId -> { markId: mark }
+  marks: {}, // 书签、页笔记、划线批注：bookId -> { markId: mark }
   stats: {}, // 阅读时长：'YYYY-MM-DD' -> { bookId: 秒 }
   downloaded: new Set(), // 已缓存到本机的书
   online: false, syncing: false, lastSync: 0,
@@ -75,25 +75,37 @@ function emit() {
   queueMicrotask(() => { emitQueued = false; for (const fn of listeners) fn(); });
 }
 
-const persist = () => local.put('kv', 'state', {
+// ---------- 账号 ----------
+// 两种用法：只在本机用（书和记录都存在这台设备上），或登录自己服务器上的账号（多端同步）。
+// 两者的书库分开保存：退出登录后回到本机书库。
+export const account = () => prefs.get('account', null); // { url, token, user }
+export const isConfigured = () => !!account();
+export const hasStarted = () => isConfigured() || prefs.get('localMode', false);
+const libKey = () => (account() ? 'state:' + account().user.id : 'state:local');
+const queueKey = () => (account() ? 'queues:' + account().user.id : 'queues:local');
+
+export function profile() {
+  const acct = account();
+  if (acct) return { nickname: acct.user.nickname || acct.user.username, username: acct.user.username, server: acct.url, avatarAt: acct.user.avatarAt || 0 };
+  return { nickname: prefs.get('nickname', '') || '本机读者', username: '', server: '', avatarAt: prefs.get('avatarAt', 0) };
+}
+
+const persist = () => local.put('kv', libKey(), {
   books: state.books, collections: state.collections, progress: state.progress, marks: state.marks, stats: state.stats,
 }).catch(() => {});
-const persistPending = () => local.put('kv', 'pending', pending).catch(() => {});
-const persistQueues = () => local.put('kv', 'queues', { marks: pendingMarks, stats: pendingStats }).catch(() => {});
-
-export function server() { return prefs.get('server', null); } // { url, key }
-export const isConfigured = () => !!server();
+const persistPending = () => (account() ? local.put('kv', queueKey(), { progress: pending, marks: pendingMarks, stats: pendingStats }).catch(() => {}) : Promise.resolve());
+const persistQueues = persistPending;
 
 // ---------- API ----------
 export class ApiError extends Error {
   constructor(message, status) { super(message); this.status = status; }
 }
-async function api(path, opts = {}, conf = server()) {
-  if (!conf) throw new ApiError('还没有连接服务器', 0);
+async function api(path, opts = {}, conf = account()) {
+  if (!conf) throw new ApiError('还没有登录服务器', 0);
   let res;
   try {
     res = await fetch(conf.url + path, {
-      ...opts, headers: { Authorization: 'Bearer ' + conf.key, ...(opts.headers || {}) },
+      ...opts, headers: { ...(conf.token ? { Authorization: 'Bearer ' + conf.token } : {}), ...(opts.headers || {}) },
     });
   } catch {
     throw new ApiError('连不上服务器，请检查网络或服务器地址', 0);
@@ -101,46 +113,138 @@ async function api(path, opts = {}, conf = server()) {
   if (!res.ok) {
     let message = `服务器返回 ${res.status}`;
     try { message = (await res.json()).error || message; } catch { /* 非 JSON */ }
+    if (res.status === 401 && conf === account()) { state.online = false; state.authLost = true; emit(); }
     throw new ApiError(message, res.status);
   }
   return res;
 }
-const apiJson = async (path, method, body) => (await api(path, {
+export { api as rawApi };
+const apiJson = async (path, method, body, conf) => (await api(path, {
   method, headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
   body: body === undefined ? undefined : JSON.stringify(body),
-})).json();
+}, conf)).json();
 
-export async function connect(url, key) {
+function normalizeUrl(url) {
   url = url.trim().replace(/\/+$/, '');
   if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-  const conf = { url, key: key.trim() };
-  const res = await (await api('/api/ping', {}, conf)).json();
-  if (res.name !== 'susuko-bunko' && res.name !== 'shiori') throw new ApiError('这个地址不是スス子文庫的同步服务', 0);
-  prefs.set('server', conf);
-  await sync();
+  return url;
+}
+async function checkServer(url) {
+  const res = await (await api('/api/ping', {}, { url })).json();
+  if (res.name !== 'susuko-bunko') throw new ApiError('这个地址不是スス子文庫的同步服务', 0);
+  if (!res.accounts) throw new ApiError('服务器版本太旧，请先把服务端更新到 0.5 或以上', 0);
+  return res;
 }
 
-export async function disconnect() {
-  prefs.remove('server');
-  await Promise.all(['files', 'covers', 'kv'].map((s) => local.clear(s)));
-  Object.assign(state, { books: {}, collections: {}, progress: {}, marks: {}, stats: {}, downloaded: new Set(), online: false });
-  pending = {}; pendingMarks = []; pendingStats = [];
-  for (const u of coverUrls.values()) URL.revokeObjectURL(u);
-  coverUrls.clear();
-  emit();
+/** 登录或注册。mode: 'login' | 'register' */
+export async function signIn(mode, { url, username, password, invite, nickname }) {
+  url = normalizeUrl(url);
+  await checkServer(url);
+  const body = mode === 'register' ? { username, password, invite, nickname, device: deviceName() } : { username, password, device: deviceName() };
+  const { token, user } = await apiJson('/api/auth/' + mode, 'POST', body, { url });
+  await switchLibrary(() => prefs.set('account', { url, token, user }));
+  await sync().catch(() => {});
 }
+
+export async function signOut() {
+  const acct = account();
+  if (!acct) return;
+  await flushNow();
+  api('/api/auth/logout', { method: 'POST' }).catch(() => {});
+  // 这个账号下载过的书从本机清掉，本机书库的书保留
+  const localLib = await local.get('kv', 'state:local').catch(() => null);
+  const keep = new Set(Object.keys(localLib?.books || {}));
+  for (const id of Object.keys(state.books)) if (!keep.has(id)) { local.del('files', id).catch(() => {}); local.del('covers', id).catch(() => {}); }
+  local.del('kv', 'state:' + acct.user.id).catch(() => {});
+  local.del('kv', 'queues:' + acct.user.id).catch(() => {});
+  await switchLibrary(() => { prefs.remove('account'); prefs.set('localMode', true); });
+}
+
+/** 切换书库（本机 ↔ 账号）：保存当前的，载入另一个 */
+async function switchLibrary(change) {
+  await persist();
+  change();
+  for (const u of coverUrls.values()) Promise.resolve(u).then((x) => x && URL.revokeObjectURL(x)).catch(() => {});
+  coverUrls.clear();
+  remotes.clear();
+  Object.assign(state, { books: {}, collections: {}, progress: {}, marks: {}, stats: {}, online: false, authLost: false });
+  pending = {}; pendingMarks = []; pendingStats = [];
+  await init();
+}
+
+export function useLocally() { prefs.set('localMode', true); emit(); }
 
 export async function init() {
   try {
-    const [cached, pend, keys, queues] = await Promise.all([
-      local.get('kv', 'state'), local.get('kv', 'pending'), local.keys('files'), local.get('kv', 'queues')]);
-    if (cached) Object.assign(state, { marks: {}, stats: {}, ...cached });
-    pending = pend || {};
-    pendingMarks = queues?.marks || []; pendingStats = queues?.stats || [];
-    for (const [id, p] of Object.entries(pending)) state.progress[id] = p;
+    const [cached, queues, keys] = await Promise.all([local.get('kv', libKey()), local.get('kv', queueKey()), local.keys('files')]);
+    if (cached) Object.assign(state, { books: {}, collections: {}, progress: {}, marks: {}, stats: {}, ...cached });
+    if (account()) {
+      pending = queues?.progress || {}; pendingMarks = queues?.marks || []; pendingStats = queues?.stats || [];
+      for (const [id, p] of Object.entries(pending)) state.progress[id] = p;
+    }
     state.downloaded = new Set(keys);
+    // 0.4 及以前的缓存（单账号、用密钥连接）：数据都在服务器上，直接丢掉，登录后重新同步
+    if (prefs.get('server', null)) { prefs.remove('server'); local.del('kv', 'state').catch(() => {}); local.del('kv', 'pending').catch(() => {}); local.del('kv', 'queues').catch(() => {}); }
   } catch { /* 本地存储不可用时只能在线使用 */ }
   emit();
+}
+
+// ---------- 个人资料 ----------
+const avatarUrls = new Map();
+export async function avatarUrl() {
+  const acct = account();
+  const key = acct ? `avatar:${acct.user.id}` : 'avatar:local';
+  const at = profile().avatarAt;
+  if (!at) return null;
+  const cacheKey = `${key}:${at}`;
+  if (avatarUrls.has(cacheKey)) return avatarUrls.get(cacheKey);
+  const job = (async () => {
+    let cached = await local.get('kv', key).catch(() => null);
+    if ((!cached || cached.at !== at) && acct) {
+      cached = { at, blob: await (await api('/api/me/avatar')).blob() };
+      local.put('kv', key, cached).catch(() => {});
+    }
+    return cached ? URL.createObjectURL(cached.blob) : null;
+  })();
+  avatarUrls.set(cacheKey, job);
+  job.catch(() => avatarUrls.delete(cacheKey));
+  return job;
+}
+async function squareJpeg(blob, size) {
+  const bmp = await createImageBitmap(blob);
+  const side = Math.min(bmp.width, bmp.height);
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  canvas.getContext('2d').drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, size, size);
+  bmp.close?.();
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.88));
+}
+export async function setAvatar(file) {
+  const jpg = await squareJpeg(file, 256);
+  const acct = account();
+  if (acct) {
+    const { user } = await (await api('/api/me/avatar', { method: 'PUT', body: jpg })).json();
+    await local.put('kv', `avatar:${user.id}`, { at: user.avatarAt, blob: jpg });
+    prefs.set('account', { ...acct, user });
+  } else {
+    const at = Date.now();
+    await local.put('kv', 'avatar:local', { at, blob: jpg });
+    prefs.set('avatarAt', at);
+  }
+  emit();
+}
+export async function setNickname(name) {
+  name = name.trim().slice(0, 40);
+  if (!name) return;
+  const acct = account();
+  if (acct) {
+    const { user } = await apiJson('/api/me', 'PATCH', { nickname: name });
+    prefs.set('account', { ...acct, user });
+  } else prefs.set('nickname', name);
+  emit();
+}
+export async function changePassword(oldPassword, newPassword) {
+  await apiJson('/api/me', 'PATCH', { oldPassword, newPassword });
 }
 
 // ---------- 同步 ----------
@@ -156,6 +260,8 @@ async function doSync() {
     await flushProgress();
     await flushQueues();
     const remote = await (await api('/api/state')).json();
+    if (remote.user) prefs.set('account', { ...account(), user: remote.user });
+    const before = Object.keys(state.books);
     state.books = remote.books; state.collections = remote.collections;
     state.marks = remote.marks || {}; state.stats = remote.stats || {};
     for (const op of pendingMarks) applyMark(op); // 还没推上去的本地改动继续保留
@@ -167,9 +273,9 @@ async function doSync() {
     state.progress = progress;
     state.online = true; state.lastSync = Date.now();
     await persist();
-    // 服务器上已删除的书，清掉本地缓存
-    for (const id of [...state.downloaded]) {
-      if (!state.books[id]) { state.downloaded.delete(id); local.del('files', id).catch(() => {}); }
+    // 这个账号在别的设备上删掉的书，清掉本机缓存（只清这个账号的，本机书库的书不动）
+    for (const id of before) {
+      if (!state.books[id] && state.downloaded.has(id)) { state.downloaded.delete(id); local.del('files', id).catch(() => {}); local.del('covers', id).catch(() => {}); }
     }
   } catch (e) {
     state.online = false;
@@ -180,6 +286,7 @@ async function doSync() {
 }
 
 async function flushProgress() {
+  if (!account()) return;
   for (const [id, p] of Object.entries(pending)) {
     try {
       const res = await apiJson('/api/progress/' + id, 'PUT', p);
@@ -203,6 +310,7 @@ function bumpStat({ day, book, seconds }) {
   d[book] = (d[book] || 0) + seconds;
 }
 async function flushQueues() {
+  if (!account()) return;
   while (pendingMarks.length) {
     const op = pendingMarks[0];
     try {
@@ -225,18 +333,20 @@ function flushQueuesSoon(ms = 1500) {
 }
 const newMarkId = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
 
-/** 新建或修改一条记号。mark: { id?, type: 'bookmark' | 'note', loc, percent, chapter, excerpt, text } */
+/** 新建或修改一条记号。mark: { id?, type: 'bookmark' | 'note' | 'highlight', loc, percent, chapter, excerpt, text, color } */
 export function saveMark(bookId, mark) {
   const full = { createdAt: Date.now(), text: '', excerpt: '', chapter: '', ...mark, id: mark.id || newMarkId(), updatedAt: Date.now() };
   const op = { op: 'put', bookId, id: full.id, mark: full };
-  applyMark(op); pendingMarks.push(op);
-  persist(); persistQueues(); emit(); flushQueuesSoon();
+  applyMark(op);
+  if (account()) { pendingMarks.push(op); persistQueues(); flushQueuesSoon(); }
+  persist(); emit();
   return full;
 }
 export function removeMark(bookId, id) {
   const op = { op: 'del', bookId, id };
-  applyMark(op); pendingMarks.push(op);
-  persist(); persistQueues(); emit(); flushQueuesSoon();
+  applyMark(op);
+  if (account()) { pendingMarks.push(op); persistQueues(); flushQueuesSoon(); }
+  persist(); emit();
 }
 export const marksOf = (bookId) => Object.values(state.marks[bookId] || {}).sort((a, b) => a.percent - b.percent || a.createdAt - b.createdAt);
 
@@ -251,8 +361,9 @@ function commitReading() {
   if (!reading || reading.acc < 1) return;
   const it = { day: dayKey(), book: reading.bookId, seconds: Math.round(reading.acc) };
   reading.acc = 0;
-  bumpStat(it); pendingStats.push(it);
-  persist(); persistQueues();
+  bumpStat(it);
+  if (account()) { pendingStats.push(it); persistQueues(); }
+  persist();
 }
 export function startReading(bookId) {
   stopReading();
@@ -283,8 +394,10 @@ export function setProgress(bookId, loc, percent) {
   touchActivity();
   const p = { loc, percent, updatedAt: Date.now(), device: deviceName() };
   state.progress[bookId] = p;
+  persist();
+  if (!account()) return;
   pending[bookId] = p;
-  persistPending(); persist();
+  persistPending();
   clearTimeout(flushTimer);
   flushTimer = setTimeout(() => flushProgress().then(() => { state.online = true; }, () => { state.online = false; }), 2500);
 }
@@ -309,12 +422,12 @@ export async function coverUrl(book) {
   if (coverUrls.has(key)) return coverUrls.get(key);
   const job = (async () => {
     let cached = await local.get('covers', book.id).catch(() => null);
-    if (!cached || cached.at !== (book.coverAt || 0)) {
+    if ((!cached || cached.at !== (book.coverAt || 0)) && account()) {
       const blob = await (await api(`/api/books/${book.id}/cover`)).blob();
       cached = { at: book.coverAt || 0, blob };
       local.put('covers', book.id, cached).catch(() => {});
     }
-    return URL.createObjectURL(cached.blob);
+    return cached ? URL.createObjectURL(cached.blob) : null;
   })();
   coverUrls.set(key, job);
   job.catch(() => coverUrls.delete(key));
@@ -434,6 +547,7 @@ function remoteOf(book) {
 export async function bookSource(book) {
   const cached = await local.get('files', book.id).catch(() => null);
   if (cached) return { source: cached, release() {} };
+  if (!account()) throw new Error('这本书的文件不在这台设备上');
   const src = remoteOf(book);
   if (prefs.get('autoCache', true)) src.fill().catch(() => {});
   return { source: src, release() { src.pause(); } };
@@ -490,7 +604,7 @@ async function inspect(file) {
     const cover = await epub.coverBlob().catch(() => null);
     const title = epub.title || name;
     const guess = epub.series ? { series: epub.series, volume: epub.volume } : guessSeries(title);
-    return { format: 'epub', title, author: epub.author, illustrator: epub.illustrator, publisher: epub.publisher, cover, ...guess };
+    return { format: 'epub', title, author: epub.author, illustrator: epub.illustrator, publisher: epub.publisher, description: epub.description, cover, ...guess };
   }
   if (ext === 'cbz' || ext === 'zip') {
     const zip = await ZipReader.open(file);
@@ -501,34 +615,70 @@ async function inspect(file) {
   throw new Error('只支持 EPUB 和 CBZ / ZIP');
 }
 
-/** 导入一本书：本地解析书名与封面 → 上传到服务器 → 留一份在本机 */
+const randomId = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
+
+/** 修改书的信息（本机模式下和服务器的规则保持一致） */
+function patchLocal(book, body) {
+  const str = (v, max) => String(v).trim().slice(0, max);
+  for (const [k, max] of [['author', 500], ['illustrator', 200], ['publisher', 200], ['description', 8000], ['review', 5000], ['series', 200]]) {
+    if (typeof body[k] === 'string') book[k] = str(body[k], max);
+  }
+  if (typeof body.title === 'string' && body.title.trim()) book.title = str(body.title, 500);
+  if (Number.isInteger(body.rating) && body.rating >= 0 && body.rating <= 5) book.rating = body.rating;
+  if (['', 'reading', 'finished'].includes(body.status)) book.status = body.status;
+  if ('volume' in body) book.volume = body.volume === null || body.volume === '' || !Number.isFinite(Number(body.volume)) ? null : Number(body.volume);
+  if (!book.series) book.volume = null;
+  if (Array.isArray(body.collections)) book.collections = [...new Set(body.collections.filter((c) => state.collections[c]))];
+  book.updatedAt = Date.now();
+}
+
+/** 导入一本书：本地解析书名、封面和简介 → 账号模式上传到服务器，本机模式直接存下 → 都留一份在本机 */
 export async function importBook(file, collectionIds = []) {
   const info = await inspect(file);
-  const q = new URLSearchParams({
-    format: info.format, title: info.title, author: info.author, name: file.name, collections: collectionIds.join(','),
-    series: info.series || '', volume: info.volume ?? '', illustrator: info.illustrator || '', publisher: info.publisher || '',
-  });
-  const { book, duplicate } = await (await api('/api/books?' + q, { method: 'POST', body: file })).json();
-  let saved = book;
-  if (!duplicate && info.cover) {
-    try {
-      const jpg = await shrinkCover(info.cover);
-      saved = (await (await api(`/api/books/${book.id}/cover`, { method: 'PUT', body: jpg })).json()).book;
-      local.put('covers', book.id, { at: saved.coverAt, blob: jpg }).catch(() => {});
-    } catch { /* 封面失败不影响书 */ }
+  const extra = { description: info.description || '' };
+  let saved, duplicate = false, jpg = null;
+  if (info.cover) jpg = await shrinkCover(info.cover).catch(() => null);
+  if (account()) {
+    const q = new URLSearchParams({
+      format: info.format, title: info.title, author: info.author, name: file.name, collections: collectionIds.join(','),
+      series: info.series || '', volume: info.volume ?? '', illustrator: info.illustrator || '', publisher: info.publisher || '',
+    });
+    const res = await (await api('/api/books?' + q, { method: 'POST', body: file })).json();
+    saved = res.book; duplicate = !!res.duplicate;
+    if (!duplicate) {
+      if (jpg) {
+        try { saved = (await (await api(`/api/books/${saved.id}/cover`, { method: 'PUT', body: jpg })).json()).book; }
+        catch { /* 封面失败不影响书 */ }
+      }
+      if (extra.description) saved = (await apiJson('/api/books/' + saved.id, 'PATCH', extra).catch(() => ({ book: saved }))).book;
+    }
+  } else {
+    const dup = Object.values(state.books).find((b) => b.size === file.size && b.fileName === file.name);
+    if (dup) return { book: dup, duplicate: true };
+    const now = Date.now();
+    saved = {
+      id: randomId(), format: info.format, size: file.size, title: info.title, author: info.author || '',
+      illustrator: info.illustrator || '', publisher: info.publisher || '', description: extra.description, status: '', rating: 0, review: '',
+      series: info.series || '', volume: info.volume ?? null, fileName: file.name,
+      collections: collectionIds.filter((c) => state.collections[c]), hasCover: !!jpg, coverAt: jpg ? now : 0, addedAt: now, updatedAt: now,
+    };
+    await local.put('files', saved.id, file.slice()); // 本机模式下文件必须存下来
+    state.downloaded.add(saved.id);
   }
+  if (jpg && saved.hasCover) local.put('covers', saved.id, { at: saved.coverAt, blob: jpg }).catch(() => {});
   state.books[saved.id] = saved;
-  try { await local.put('files', saved.id, file.slice()); state.downloaded.add(saved.id); } catch { /* 忽略 */ }
+  if (account()) { try { await local.put('files', saved.id, file.slice()); state.downloaded.add(saved.id); } catch { /* 忽略 */ } }
   persist(); emit();
-  return { book: saved, duplicate: !!duplicate };
+  return { book: saved, duplicate };
 }
 
 export async function updateBook(id, patch) {
-  const { book } = await apiJson('/api/books/' + id, 'PATCH', patch);
-  state.books[id] = book; persist(); emit();
+  if (account()) state.books[id] = (await apiJson('/api/books/' + id, 'PATCH', patch)).book;
+  else patchLocal(state.books[id], patch);
+  persist(); emit();
 }
 export async function deleteBook(id) {
-  await apiJson('/api/books/' + id, 'DELETE');
+  if (account()) await apiJson('/api/books/' + id, 'DELETE');
   delete state.books[id]; delete state.progress[id]; delete pending[id]; delete state.marks[id];
   state.downloaded.delete(id);
   local.del('files', id).catch(() => {}); local.del('covers', id).catch(() => {});
@@ -537,19 +687,88 @@ export async function deleteBook(id) {
 
 // ---------- 合集 ----------
 export async function createCollection(name) {
-  const { collection } = await apiJson('/api/collections', 'POST', { name });
+  let collection;
+  if (account()) collection = (await apiJson('/api/collections', 'POST', { name })).collection;
+  else {
+    const now = Date.now();
+    const order = Object.values(state.collections).reduce((m, c) => Math.max(m, c.order), 0) + 1;
+    collection = { id: randomId(), name: name.trim().slice(0, 60), order, createdAt: now, updatedAt: now };
+  }
   state.collections[collection.id] = collection; persist(); emit();
   return collection;
 }
 export async function renameCollection(id, name) {
-  const { collection } = await apiJson('/api/collections/' + id, 'PATCH', { name });
-  state.collections[id] = collection; persist(); emit();
+  if (account()) state.collections[id] = (await apiJson('/api/collections/' + id, 'PATCH', { name })).collection;
+  else Object.assign(state.collections[id], { name: name.trim().slice(0, 60), updatedAt: Date.now() });
+  persist(); emit();
 }
 export async function deleteCollection(id) {
-  await apiJson('/api/collections/' + id, 'DELETE');
+  if (account()) await apiJson('/api/collections/' + id, 'DELETE');
   delete state.collections[id];
   for (const b of Object.values(state.books)) b.collections = b.collections.filter((c) => c !== id);
   persist(); emit();
+}
+
+// ---------- 本机书库 → 账号 ----------
+/** 本机书库里有多少本书（登录后用来问要不要上传） */
+export async function localLibrarySize() {
+  const lib = await local.get('kv', 'state:local').catch(() => null);
+  return Object.keys(lib?.books || {}).length;
+}
+/** 把本机书库整个搬到当前账号：书、封面、合集、进度、书签批注、阅读时长 */
+export async function uploadLocalLibrary(onStep) {
+  const lib = await local.get('kv', 'state:local').catch(() => null);
+  if (!lib || !account()) return { moved: 0, failed: 0 };
+  const colMap = {};
+  for (const c of Object.values(lib.collections || {}).sort((a, b) => a.order - b.order)) {
+    const same = Object.values(state.collections).find((x) => x.name === c.name);
+    colMap[c.id] = same ? same.id : (await createCollection(c.name)).id;
+  }
+  const idMap = {};
+  let moved = 0, failed = 0;
+  const books = Object.values(lib.books);
+  for (const [i, b] of books.entries()) {
+    onStep?.(i + 1, books.length, b);
+    try {
+      const file = await local.get('files', b.id);
+      if (!file) throw new Error('文件不在本机');
+      const q = new URLSearchParams({
+        format: b.format, title: b.title, author: b.author || '', name: b.fileName || `${b.title}.${b.format}`,
+        series: b.series || '', volume: b.volume ?? '', illustrator: b.illustrator || '', publisher: b.publisher || '', addedAt: b.addedAt,
+      });
+      let { book } = await (await api('/api/books?' + q, { method: 'POST', body: file })).json();
+      const cover = b.hasCover ? await local.get('covers', b.id).catch(() => null) : null;
+      if (cover) {
+        book = (await (await api(`/api/books/${book.id}/cover`, { method: 'PUT', body: cover.blob })).json()).book;
+        local.put('covers', book.id, { at: book.coverAt, blob: cover.blob }).catch(() => {});
+      }
+      book = (await apiJson('/api/books/' + book.id, 'PATCH', {
+        description: b.description || '', status: b.status || '', rating: b.rating || 0, review: b.review || '',
+        collections: (b.collections || []).map((c) => colMap[c]).filter(Boolean),
+      })).book;
+      idMap[b.id] = book.id;
+      if (book.id !== b.id) { await local.put('files', book.id, file); state.downloaded.add(book.id); }
+      const p = lib.progress?.[b.id];
+      if (p) await apiJson('/api/progress/' + book.id, 'PUT', p);
+      for (const m of Object.values(lib.marks?.[b.id] || {})) await apiJson(`/api/marks/${book.id}/${m.id}`, 'PUT', m);
+      state.books[book.id] = book;
+      moved++;
+    } catch (e) { failed++; console.warn('上传失败', b.title, e); }
+  }
+  const add = [];
+  for (const [day, perBook] of Object.entries(lib.stats || {})) {
+    for (const [id, seconds] of Object.entries(perBook)) if (idMap[id]) add.push({ day, book: idMap[id], seconds });
+  }
+  if (add.length) await apiJson('/api/stats', 'POST', { add }).catch(() => {});
+  // 搬过去的书从本机书库里拿掉，没搬成功的留着
+  for (const [oldId, newId] of Object.entries(idMap)) {
+    delete lib.books[oldId]; delete lib.progress?.[oldId]; delete lib.marks?.[oldId];
+    if (oldId !== newId) { local.del('files', oldId).catch(() => {}); local.del('covers', oldId).catch(() => {}); }
+  }
+  if (!Object.keys(lib.books).length) lib.collections = {};
+  await local.put('kv', 'state:local', lib);
+  await sync().catch(() => {});
+  return { moved, failed };
 }
 export const sortedCollections = () => Object.values(state.collections).sort((a, b) => a.order - b.order);
 
