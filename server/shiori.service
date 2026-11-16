@@ -1,0 +1,18 @@
+# 放到 /etc/systemd/system/shiori.service，然后：
+#   sudo systemctl daemon-reload && sudo systemctl enable --now shiori
+[Unit]
+Description=Susuko Bunko reading sync server
+After=network.target
+
+[Service]
+# 按你的实际路径和用户修改下面三行
+WorkingDirectory=/opt/shiori
+ExecStart=/usr/bin/node server/server.js
+User=www-data
+Environment=SHIORI_KEY=请改成一串足够长的随机密钥
+Environment=PORT=8787
+Environment=DATA_DIR=/var/lib/shiori
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

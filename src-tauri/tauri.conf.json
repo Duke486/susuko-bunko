@@ -1,0 +1,29 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Susuko Bunko",
+  "version": "0.1.0",
+  "identifier": "com.susuko.bunko",
+  "build": {
+    "frontendDist": "../app"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "スス子文庫",
+        "width": 1180,
+        "height": 800,
+        "minWidth": 360,
+        "minHeight": 520,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"]
+  }
+}

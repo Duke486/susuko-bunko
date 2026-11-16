@@ -1,0 +1,86 @@
+# 在 GitHub 上自动打包 Windows 安装包和安卓 APK。
+# 用法：把整个项目推到一个 GitHub 仓库 → Actions → “打包客户端” → Run workflow，
+#       跑完后在这次运行页面底部的 Artifacts 里下载。
+#
+# 安卓签名（可选但建议）：在仓库 Settings → Secrets and variables → Actions 里添加
+#   ANDROID_KEYSTORE_BASE64   签名文件的 base64（base64 -w0 my.jks）
+#   ANDROID_KEYSTORE_PASSWORD 签名文件密码（密钥密码需与它相同）
+#   ANDROID_KEY_ALIAS         密钥别名
+# 不添加时每次会用临时密钥签名：能安装，但升级时要先卸载旧版。
+name: 打包客户端
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm install
+      - run: npx tauri build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: src-tauri/target/release/bundle/nsis/*.exe
+
+  android:
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 27.0.12077973
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+      - name: 安装 NDK 与构建工具
+        run: |
+          sdkmanager "ndk;$NDK_VERSION" "platforms;android-34" "build-tools;34.0.0"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm install
+      - run: npx tauri android init
+      - run: npx tauri icon src-tauri/app-icon.png
+      - run: npx tauri android build --apk --target aarch64 --target armv7
+      - name: 签名 APK
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -n 1)
+          TOOLS="$ANDROID_HOME/build-tools/34.0.0"
+          if [ -n "${KEYSTORE_B64:-}" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > release.jks
+          else
+            KS_PASS=temporary-key; KS_ALIAS=bunko
+            keytool -genkeypair -keystore release.jks -storepass "$KS_PASS" -keypass "$KS_PASS" \
+              -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Susuko Bunko"
+          fi
+          "$TOOLS/zipalign" -f -p 4 "$APK" aligned.apk
+          "$TOOLS/apksigner" sign --ks release.jks --ks-pass "pass:$KS_PASS" --ks-key-alias "$KS_ALIAS" \
+            --out SusukoBunko.apk aligned.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: SusukoBunko.apk
