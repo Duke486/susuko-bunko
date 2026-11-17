@@ -6,7 +6,7 @@ import * as ai from './ai.js';
 import * as theme from './theme.js';
 import { mountShelf } from './shelf3d.js';
 import { labelOf, labelById, matchLabel, searchLabels, logoUrl } from './labels.js';
-import { buildSpine, parseFace } from './spine.js';
+import { buildSpine, fitSpine } from './spine.js';
 
 // 0.6 起立体书架是默认的书架视图（旧的“书脊”视图并入了它）
 if (prefs.get('layout') === 'spine' || !prefs.get('layoutV')) { prefs.set('layout', 'shelf'); prefs.set('layoutV', 1); }
@@ -303,8 +303,10 @@ function renderTools() {
 // ---------- 系列介绍 ----------
 function renderIntro() {
   const f = view.filter;
-  els.intro.hidden = !isSeries(f);
-  if (!isSeries(f)) return;
+  // 立体书架下面已经有标题和简介了，系列页就不再在上面重复一张大卡片
+  const show = isSeries(f) && !(view.layout === 'shelf' && !view.selecting && visibleBooks().length > 0);
+  els.intro.hidden = !show;
+  if (!show) return;
   const name = f.slice(7);
   const books = booksIn(f).sort(byVolume);
   if (!books.length) return;
@@ -571,7 +573,7 @@ function renderShelf3d(list) {
 function spineSpec(b) {
   return {
     title: b.series || b.title, volume: b.series ? b.volume : null, author: b.author,
-    label: labelOf(b), publisher: b.publisher, face: parseFace(b.spineFace), reading: store.statusOf(b) === 'reading',
+    label: labelOf(b), publisher: b.publisher, reading: store.statusOf(b) === 'reading',
   };
 }
 function openShelfItem(it) {
@@ -588,7 +590,8 @@ function drawShelfCaption() {
     ? [b.author, `共 ${it.group.books.length} 卷`, b.volume != null && st !== 'unread' && `读到第 ${b.volume} 卷`]
     : [b.author, b.illustrator && `插画 ${b.illustrator}`, { reading: `在读 ${fmtPercent(Math.min(p, 0.99))}`, finished: '已读完', unread: '未读' }[st]];
   const first = it.group.series ? [...it.group.books].sort(byVolume)[0] : b;
-  const desc = (it.group.series && state.series[it.group.series]?.description) || first.description || b.description || '';
+  const inSeries = isSeries(view.filter) && state.series[view.filter.slice(7)]?.description;
+  const desc = (it.group.series && state.series[it.group.series]?.description) || first.description || b.description || inSeries || '';
   const open = () => openShelfItem(it);
   sh.caption.replaceChildren(
     h('div.cap-head',
@@ -914,49 +917,26 @@ function editBook(id) {
     const publisher = h('input.field', { type: 'text', value: book.publisher || '', maxLength: 200, placeholder: '输入文库或出版社检索，例如：电击、GAGAGA、MF', autocomplete: 'off', role: 'combobox', 'aria-autocomplete': 'list' });
     const published = h('input.field', { type: 'text', value: book.published || '', maxLength: 10, placeholder: '例如 2024-07-18 或 2024-07', inputMode: 'numeric', pattern: '\\d{4}(\\D\\d{1,2}(\\D\\d{1,2})?)?\\D?', title: '年-月-日，也可以只写年月或年份' });
     let imprint = book.imprint || '';
-    let face = book.spineFace || '';
     const spineHost = h('div.spine-prev');
     const drawSpine = () => {
       const label = labelById(imprint) || matchLabel(publisher.value);
       const sp = buildSpine({
         title: series.value.trim() || title.value.trim(), volume: series.value.trim() ? volume.value : null, author: author.value.trim(),
-        label, publisher: publisher.value.trim(), face: parseFace(face),
+        label, publisher: publisher.value.trim(),
       });
       const color = prefs.get('spineColors', {})[`${book.id}:${book.coverAt || 0}`];
       spineHost.style.setProperty('--sc', color || `hsl(${fallbackHue(book.series || book.title)} 34% 52%)`);
       spineHost.classList.toggle('is-light', !!color && theme.hexToOklch(color).L > 0.68);
       spineHost.replaceChildren(sp.el);
-      if (coverSrc) sp.setCover(coverSrc);
+      requestAnimationFrame(() => fitSpine(sp.el));
       drawPubTag(label);
     };
-    let coverSrc = '';
     const pubTag = h('span.pub-tag');
     const drawPubTag = (label) => pubTag.replaceChildren(...(label ? [label.logo ? h('img', { src: logoUrl(label), alt: '' }) : '', h('span', `书脊会用「${label.name}」的样式`)] : [h('span', publisher.value.trim() ? '没有对应的文库样式，书脊上只印名字' : '')]));
     const combo = comboBox(publisher, (text) => searchLabels(text, [...new Set(Object.values(state.books).map((x) => x.publisher).filter(Boolean))]), (label) => {
       publisher.value = label.short || label.name; imprint = label.id; drawSpine();
     });
     publisher.addEventListener('input', () => { imprint = ''; drawSpine(); });
-    // 书脊人物小图：点封面上的位置
-    const faceBox = h('span.face-box');
-    const coverPick = h('div.face-pick', { title: '点一下，选书脊上人物小图的位置' }, faceBox);
-    const showFace = h('input', { type: 'checkbox', checked: face !== 'none' });
-    const placeBox = () => {
-      const f = parseFace(face);
-      coverPick.classList.toggle('is-off', !f);
-      if (!f) return;
-      const bw = 1 / 3, bh = 72 / (88 * 3 * 1.42);
-      faceBox.style.left = `${Math.min(1 - bw, Math.max(0, f.x - bw / 2)) * 100}%`;
-      faceBox.style.top = `${Math.min(1 - bh, Math.max(0, f.y - bh / 2)) * 100}%`;
-      faceBox.style.width = `${bw * 100}%`; faceBox.style.height = `${bh * 100}%`;
-    };
-    coverPick.addEventListener('click', (e) => {
-      const r = coverPick.getBoundingClientRect();
-      face = `${((e.clientX - r.left) / r.width).toFixed(3)},${((e.clientY - r.top) / r.height).toFixed(3)}`;
-      showFace.checked = true; placeBox(); drawSpine();
-    });
-    showFace.addEventListener('change', () => { face = showFace.checked ? (face === 'none' ? '' : face) : 'none'; placeBox(); drawSpine(); });
-    if (book.hasCover) store.coverUrl(book).then((url) => { if (!url) return; coverSrc = url; coverPick.prepend(h('img', { src: url, alt: '', draggable: false })); drawSpine(); }).catch(() => {});
-    else coverPick.classList.add('is-empty');
     const description = h('textarea.field.is-area', { value: book.description || '', maxLength: 8000, rows: 5, placeholder: '这本书讲了什么？' });
     const descStatus = h('p.field-hint', { role: 'status' });
     const review = h('textarea.field.is-area', { value: book.review || '', maxLength: 5000, rows: 4, placeholder: '读完有什么想说的？' });
@@ -976,7 +956,7 @@ function editBook(id) {
     const volume = h('input.field', { type: 'number', value: book.volume ?? '', min: 0, step: 'any', placeholder: '例如 3', inputMode: 'decimal' });
     const names = [...new Set(Object.values(state.books).map((b) => b.series).filter(Boolean))];
     for (const f of [title, author, series, volume]) f.addEventListener('input', drawSpine);
-    queueMicrotask(() => { drawSpine(); placeBox(); });
+    queueMicrotask(drawSpine);
     return h('form.dialog-body', {
       onsubmit: async (e) => {
         e.preventDefault();
@@ -984,7 +964,7 @@ function editBook(id) {
           title: title.value, author: author.value, illustrator: illustrator.value.trim(), publisher: publisher.value.trim(), status,
           rating, review: review.value.trim(), description: description.value.trim(),
           series: series.value.trim(), volume: volume.value === '' ? null : Number(volume.value),
-          imprint, published: normDate(published.value), spineFace: face,
+          imprint, published: normDate(published.value),
         };
         if (await guard(() => store.updateBook(id, patch), '已保存')) { close(); exitSelect(false); renderAll(); }
       },
@@ -1008,9 +988,7 @@ function editBook(id) {
     h('p.field-hint', '填了系列和卷号，书架上会显示成“系列名 + 卷号”，同系列的书会叠在一起并按卷号排序。'),
     h('label.field-label', '书脊'),
     h('div.spine-edit', spineHost,
-      h('div.spine-side', coverPick,
-        h('label.check-row', showFace, '书脊上显示人物小图'),
-        h('p.field-hint', '点封面选人物小图的位置。书脊样式按“出版社 / 文库”自动选，是软件里的示意，不是真实书脊的复刻。'))),
+      h('p.field-hint', '书脊样式按“出版社 / 文库”自动选：顶上是文库小标，中间是书名、卷号和作者，最下面是文库名。这是软件里的示意，不是真实书脊的复刻。')),
     h('label.field-label', '我的评分'), stars,
     h('label.field-label', '书评'), review,
     h('div.dialog-actions',

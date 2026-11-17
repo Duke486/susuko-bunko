@@ -21,7 +21,7 @@ const OPEN_SIGNUP = process.env.OPEN_SIGNUP === '1';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const APP_DIR = path.resolve(process.env.APP_DIR || path.join(__dirname, '..', 'app'));
 const MAX_BOOK_BYTES = Number(process.env.MAX_BOOK_MB || 2048) * 1024 * 1024;
-const VERSION = '0.8.0';
+const VERSION = '0.8.1';
 
 if (!KEY || KEY.length < 8) {
   console.error('请先设置邀请码（至少 8 位）：SHIORI_KEY=xxxxxxxx node server.js');
