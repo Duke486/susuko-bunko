@@ -5,6 +5,8 @@ import { h, icon, toast, dialog, confirmDialog, promptDialog, dropdown, fmtPerce
 import * as ai from './ai.js';
 import * as theme from './theme.js';
 import { mountShelf } from './shelf3d.js';
+import { labelOf, labelById, matchLabel, searchLabels, logoUrl } from './labels.js';
+import { buildSpine, parseFace } from './spine.js';
 
 // 0.6 起立体书架是默认的书架视图（旧的“书脊”视图并入了它）
 if (prefs.get('layout') === 'spine' || !prefs.get('layoutV')) { prefs.set('layout', 'shelf'); prefs.set('layoutV', 1); }
@@ -208,7 +210,7 @@ function renderShelf() {
   };
   els.layoutSeg = h('div.icon-seg', { role: 'group', 'aria-label': '查看方式' });
   els.sort = dropdown({
-    label: '排序方式', value: view.sort, options: [['recent', '最近阅读'], ['added', '最近添加'], ['title', '按书名']],
+    label: '排序方式', value: view.sort, options: [['recent', '最近阅读'], ['added', '最近添加'], ['published', '出版时间'], ['title', '按书名']],
     onChange: (v) => { view.sort = v; prefs.set('sort', v); renderBody(); },
   });
   els.selectBtn = h('button.icon-btn', { type: 'button', onclick: () => (view.selecting ? exitSelect() : enterSelect()) }, icon('checkCircle'));
@@ -311,7 +313,7 @@ function renderIntro() {
   const done = books.filter((b) => store.statusOf(b) === 'finished').length;
   const own = state.series[name]?.description;
   const text = own || first.description || '';
-  const desc = h('p.si-desc', text || '还没有系列简介。可以自己写，也可以让阅读助手写一段。');
+  const desc = h('p.si-desc', text || '还没有系列简介。');
   const more = text.length > 120 && h('button.link-btn', { type: 'button', onclick: () => { desc.classList.toggle('is-open'); more.textContent = desc.classList.contains('is-open') ? '收起' : '展开全部'; } }, '展开全部');
   const people = [first.author, first.illustrator && `插画 ${first.illustrator}`, first.publisher].filter(Boolean).join(' · ');
   const sec = books.reduce((n, b) => n + store.secondsOf(b.id), 0);
@@ -329,8 +331,7 @@ function renderIntro() {
       h('div.si-actions',
         h('button.btn.is-primary', { type: 'button', onclick: () => openBook(cur.id) }, icon('dict', 18),
           store.statusOf(cur) === 'unread' && !done ? '从第 1 卷开始' : `继续读${cur.volume != null ? `第 ${cur.volume} 卷` : ''}`),
-        h('button.btn', { type: 'button', onclick: () => editSeriesDescription(name, own || '') }, icon('pen', 18), own ? '修改简介' : '写简介'),
-        h('button.btn', { type: 'button', onclick: () => aiDescribeSeries(name, books) }, icon('sparkle', 18), '让助手写简介'))));
+        h('button.btn', { type: 'button', onclick: () => editSeriesDescription(name, own || '') }, icon('pen', 18), own ? '修改简介' : '写简介'))));
 }
 function editSeriesDescription(name, value) {
   return dialog(`「${name}」的系列简介`, (close) => {
@@ -346,10 +347,6 @@ function editSeriesDescription(name, value) {
   });
 }
 const seriesFacts = (name, books) => ({ kind: 'series', title: name, author: books[0]?.author, illustrator: books[0]?.illustrator, publisher: books[0]?.publisher, volumes: books.length, existing: books[0]?.description });
-function aiDescribeSeries(name, books) {
-  editSeriesDescription(name, state.series[name]?.description || '').then(() => {});
-  setTimeout(() => document.querySelector('dialog[open] .btn.is-quiet')?.click(), 60);
-}
 /** 让阅读助手把简介写进文本框（边写边显示），写完由用户确认保存 */
 async function fillWithAi(area, status, facts) {
   if (!ai.aiReady() || (!ai.aiSettings().key && /openai\.com/.test(ai.aiSettings().base))) {
@@ -392,6 +389,7 @@ function visibleBooks() {
   if (isSeries(view.filter)) list.sort(byVolume);
   else if (view.sort === 'title') list.sort((a, b) => store.natural(a.series || a.title, b.series || b.title) || byVolume(a, b));
   else if (view.sort === 'added') list.sort((a, b) => b.addedAt - a.addedAt);
+  else if (view.sort === 'published') list.sort((a, b) => (b.published || '').localeCompare(a.published || '') || byVolume(a, b)); // 新出的在前，没填的排最后
   else list.sort((a, b) => Math.max(readAt(b), b.addedAt) - Math.max(readAt(a), a.addedAt));
   return list;
 }
@@ -403,6 +401,7 @@ function fallbackHue(text) {
   for (const ch of text) n = (n * 31 + ch.codePointAt(0)) % 360;
   return n;
 }
+const fmtPublished = (v) => { const [y, m, d] = String(v).split('-'); return `${y} 年${m ? ` ${+m} 月` : ''}${d ? ` ${+d} 日` : ''}`; };
 const bookLabel = (book) => (book.series ? (book.volume != null ? `${book.series} ${book.volume}` : book.series) : book.title);
 
 /** 浏览时把同系列的书叠成一本；搜索、系列页里逐本显示 */
@@ -551,10 +550,10 @@ function renderShelf3d(list) {
       title: g.series || (b.series ? b.series : b.title),
       volume: g.series ? null : b.series ? b.volume : null,
       colorKey: `${b.id}:${b.coverAt || 0}`, fallbackHue: fallbackHue(b.series || b.title),
-      reading: store.statusOf(b) === 'reading',
+      spine: spineSpec(b),
     };
   });
-  const keys = items.map((i) => i.key).join('|');
+  const keys = items.map((i) => `${i.key}:${i.book.updatedAt || 0}`).join('|');
   if (els.shelf && els.shelf.keys === keys && els.body.contains(els.shelf.stage)) { drawShelfCaption(); return; }
   els.shelf?.api.destroy();
   const stage = h('div.shelf-host');
@@ -569,6 +568,12 @@ function renderShelf3d(list) {
     onOpen: (i) => openShelfItem(items[i]),
   });
 }
+function spineSpec(b) {
+  return {
+    title: b.series || b.title, volume: b.series ? b.volume : null, author: b.author,
+    label: labelOf(b), publisher: b.publisher, face: parseFace(b.spineFace), reading: store.statusOf(b) === 'reading',
+  };
+}
 function openShelfItem(it) {
   if (!it) return;
   if (it.group.series) openSeries(it.group.series); else openBook(it.book.id);
@@ -582,18 +587,24 @@ function drawShelfCaption() {
   const meta = it.group.series
     ? [b.author, `共 ${it.group.books.length} 卷`, b.volume != null && st !== 'unread' && `读到第 ${b.volume} 卷`]
     : [b.author, b.illustrator && `插画 ${b.illustrator}`, { reading: `在读 ${fmtPercent(Math.min(p, 0.99))}`, finished: '已读完', unread: '未读' }[st]];
+  const first = it.group.series ? [...it.group.books].sort(byVolume)[0] : b;
+  const desc = (it.group.series && state.series[it.group.series]?.description) || first.description || b.description || '';
+  const open = () => openShelfItem(it);
   sh.caption.replaceChildren(
-    h('div.cap-index', h('b', String(view.spineIndex + 1).padStart(2, '0')), h('span', `/ ${String(total).padStart(2, '0')}`)),
-    h('div.cap-main',
-      h('h2', it.title + (it.volume != null ? ` ${it.volume}` : '')),
-      h('p', meta.filter(Boolean).join(' · ')),
-      it.group.series ? null : h('div.cap-bar', h('span', { style: `width:${Math.round(Math.min(1, p) * 100)}%` }))),
-    h('div.cap-actions',
-      h('button.icon-btn', { type: 'button', 'aria-label': '上一本', onclick: () => sh.api.prev() }, icon('prev')),
-      h('button.btn.is-primary', { type: 'button', onclick: () => openShelfItem(it) },
-        it.group.series ? '打开系列' : p > 0 ? '继续阅读' : '开始阅读'),
-      !it.group.series && h('button.btn', { type: 'button', onclick: () => showDetail(b.id) }, '详情'),
-      h('button.icon-btn', { type: 'button', 'aria-label': '下一本', onclick: () => sh.api.next() }, icon('next'))));
+    h('div.cap-head',
+      h('button.cap-cover', { type: 'button', 'aria-label': '打开', onclick: open }, coverOf(b)),
+      h('div.cap-main',
+        h('h2', it.title + (it.volume != null ? ` ${it.volume}` : '')),
+        h('p', meta.filter(Boolean).join(' · ')),
+        it.group.series ? null : h('div.cap-bar', h('span', { style: `width:${Math.round(Math.min(1, p) * 100)}%` }))),
+      h('div.cap-actions',
+        h('div.cap-nav',
+          h('button.icon-btn', { type: 'button', 'aria-label': '上一本', onclick: () => sh.api.prev() }, icon('prev')),
+          h('span.cap-count', h('b', String(view.spineIndex + 1)), ` / ${total}`),
+          h('button.icon-btn', { type: 'button', 'aria-label': '下一本', onclick: () => sh.api.next() }, icon('next'))),
+        !it.group.series && h('button.btn', { type: 'button', onclick: () => showDetail(b.id) }, '详情'),
+        h('button.btn.is-primary', { type: 'button', onclick: open }, it.group.series ? '打开系列' : p > 0 ? '继续阅读' : '开始阅读'))),
+    h('p.cap-desc' + (desc ? '' : '.is-empty'), desc ? desc.replace(/\s*\n\s*/g, ' ') : '还没有简介，可以在“编辑信息”里写。'));
   // 宽屏时书架旁边直接显示选中那本的详情
   if (!it.group.series && view.detail !== b.id && window.innerWidth > 1180 && (!view.detail || view.autoDetail)) { view.detail = b.id; view.autoDetail = true; renderDetail(); }
 }
@@ -625,6 +636,7 @@ function renderPill() {
   syncCoverAccent();
   const b = !view.selecting && !isPage(view.filter) && lastRead();
   els.pill.hidden = !b;
+  document.body.classList.toggle('has-pill', !!b);
   if (!b) return;
   const p = state.progress[b.id]?.percent || 0;
   els.pill.onclick = () => openBook(b.id);
@@ -648,10 +660,11 @@ function renderDetail() {
   const sec = store.secondsOf(b.id);
   const marks = store.marksOf(b.id);
   const hl = marks.filter((m) => m.type === 'highlight').length;
-  const desc = h('p.detail-desc', b.description || '还没有简介。可以点“编辑信息”自己写，或者让阅读助手写一段。');
+  const desc = h('p.detail-desc', b.description || '还没有简介。可以在“编辑信息”里写。');
   const more = b.description && b.description.length > 160 && h('button.link-btn', { type: 'button', onclick: () => { desc.classList.toggle('is-open'); more.textContent = desc.classList.contains('is-open') ? '收起' : '展开全部'; } }, '展开全部');
   const facts = [
     b.illustrator && ['插画', b.illustrator], b.publisher && ['出版社', b.publisher],
+    labelOf(b) && labelOf(b).name !== b.publisher && ['文库', labelOf(b).name], b.published && ['出版时间', fmtPublished(b.published)],
     b.series && ['系列', b.volume != null ? `${b.series} · 第 ${b.volume} 卷` : b.series],
     ['格式', b.format === 'cbz' ? '漫画（CBZ / ZIP）' : 'EPUB'], ['大小', fmtSize(b.size || 0)],
     ['阅读时长', sec ? fmtDuration(sec) : '还没开始'],
@@ -673,11 +686,7 @@ function renderDetail() {
       h('div.detail-actions',
         h('button.btn.is-primary.is-grow', { type: 'button', onclick: () => openBook(b.id) }, icon('dict', 18), p > 0 ? '继续阅读' : '开始阅读'),
         h('button.btn', { type: 'button', onclick: () => editBook(b.id) }, '编辑信息')),
-      h('section.detail-sec', h('h3', '简介'), desc, more,
-        !b.description && h('button.btn.is-soft-sm', { type: 'button', onclick: () => {
-          editBook(b.id);
-          setTimeout(() => document.querySelector('dialog[open] .label-row .link-btn')?.click(), 60);
-        } }, icon('sparkle', 16), '让助手写简介')),
+      h('section.detail-sec', h('h3', '简介'), desc, more),
       b.review && h('section.detail-sec', h('h3', '我的书评'), h('p.detail-review', b.review)),
       marks.length > 0 && h('section.detail-sec',
         h('button.detail-link', { type: 'button', onclick: () => { view.excerptBook = b.id; setFilter('excerpts'); } },
@@ -863,13 +872,91 @@ async function deleteBooks(ids) {
   if (ok) exitSelect();
 }
 
+/** 把 2024/7/18、2024.07 这类写法整理成 2024-07-18 / 2024-07 */
+function normDate(v) {
+  const m = String(v || '').trim().match(/^(\d{4})(?:[-/.年](\d{1,2})(?:[-/.月](\d{1,2}))?)?/);
+  if (!m) return '';
+  return [m[1], m[2] && m[2].padStart(2, '0'), m[3] && m[3].padStart(2, '0')].filter(Boolean).join('-');
+}
+/** 输入框 + 下拉检索：打字时列出匹配的文库，方向键选、回车确定 */
+function comboBox(input, search, onPick) {
+  const list = h('div.combo-list', { role: 'listbox', hidden: true });
+  let rows = [], active = -1;
+  const draw = () => {
+    rows = search(input.value);
+    list.hidden = !rows.length || document.activeElement !== input;
+    list.replaceChildren(...rows.map((L, i) => h('button.combo-item' + (i === active ? '.is-active' : ''), {
+      type: 'button', role: 'option', tabIndex: -1,
+      onpointerdown: (e) => e.preventDefault(), // 不让输入框失去焦点
+      onclick: () => pick(i),
+    }, h('span.combo-logo', L.logo ? h('img', { src: logoUrl(L), alt: '' }) : h('span', (L.short || L.name).slice(0, 1))),
+      h('span.combo-text', h('b', L.name), h('small', L.company)))));
+  };
+  const pick = (i) => { const L = rows[i]; if (!L) return; list.hidden = true; active = -1; if (L.id) onPick(L); else { input.value = L.name; input.dispatchEvent(new Event('input')); } };
+  input.addEventListener('focus', () => { active = -1; draw(); });
+  input.addEventListener('input', () => { active = -1; draw(); });
+  input.addEventListener('blur', () => { list.hidden = true; });
+  input.addEventListener('keydown', (e) => {
+    if (list.hidden) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); active = (active + (e.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length; draw(); list.children[active]?.scrollIntoView({ block: 'nearest' }); }
+    else if (e.key === 'Enter' && active >= 0) { e.preventDefault(); pick(active); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); list.hidden = true; }
+  });
+  return h('div.combo', input, list);
+}
+
 function editBook(id) {
   const book = state.books[id];
   return dialog('编辑信息', (close) => {
     const title = h('input.field', { type: 'text', value: book.title, maxLength: 200, required: true });
     const author = h('input.field', { type: 'text', value: book.author, maxLength: 200 });
     const illustrator = h('input.field', { type: 'text', value: book.illustrator || '', maxLength: 200 });
-    const publisher = h('input.field', { type: 'text', value: book.publisher || '', maxLength: 200, placeholder: '例如：电击文库' });
+    const publisher = h('input.field', { type: 'text', value: book.publisher || '', maxLength: 200, placeholder: '输入文库或出版社检索，例如：电击、GAGAGA、MF', autocomplete: 'off', role: 'combobox', 'aria-autocomplete': 'list' });
+    const published = h('input.field', { type: 'text', value: book.published || '', maxLength: 10, placeholder: '例如 2024-07-18 或 2024-07', inputMode: 'numeric', pattern: '\\d{4}(\\D\\d{1,2}(\\D\\d{1,2})?)?\\D?', title: '年-月-日，也可以只写年月或年份' });
+    let imprint = book.imprint || '';
+    let face = book.spineFace || '';
+    const spineHost = h('div.spine-prev');
+    const drawSpine = () => {
+      const label = labelById(imprint) || matchLabel(publisher.value);
+      const sp = buildSpine({
+        title: series.value.trim() || title.value.trim(), volume: series.value.trim() ? volume.value : null, author: author.value.trim(),
+        label, publisher: publisher.value.trim(), face: parseFace(face),
+      });
+      const color = prefs.get('spineColors', {})[`${book.id}:${book.coverAt || 0}`];
+      spineHost.style.setProperty('--sc', color || `hsl(${fallbackHue(book.series || book.title)} 34% 52%)`);
+      spineHost.classList.toggle('is-light', !!color && theme.hexToOklch(color).L > 0.68);
+      spineHost.replaceChildren(sp.el);
+      if (coverSrc) sp.setCover(coverSrc);
+      drawPubTag(label);
+    };
+    let coverSrc = '';
+    const pubTag = h('span.pub-tag');
+    const drawPubTag = (label) => pubTag.replaceChildren(...(label ? [label.logo ? h('img', { src: logoUrl(label), alt: '' }) : '', h('span', `书脊会用「${label.name}」的样式`)] : [h('span', publisher.value.trim() ? '没有对应的文库样式，书脊上只印名字' : '')]));
+    const combo = comboBox(publisher, (text) => searchLabels(text, [...new Set(Object.values(state.books).map((x) => x.publisher).filter(Boolean))]), (label) => {
+      publisher.value = label.short || label.name; imprint = label.id; drawSpine();
+    });
+    publisher.addEventListener('input', () => { imprint = ''; drawSpine(); });
+    // 书脊人物小图：点封面上的位置
+    const faceBox = h('span.face-box');
+    const coverPick = h('div.face-pick', { title: '点一下，选书脊上人物小图的位置' }, faceBox);
+    const showFace = h('input', { type: 'checkbox', checked: face !== 'none' });
+    const placeBox = () => {
+      const f = parseFace(face);
+      coverPick.classList.toggle('is-off', !f);
+      if (!f) return;
+      const bw = 1 / 3, bh = 72 / (88 * 3 * 1.42);
+      faceBox.style.left = `${Math.min(1 - bw, Math.max(0, f.x - bw / 2)) * 100}%`;
+      faceBox.style.top = `${Math.min(1 - bh, Math.max(0, f.y - bh / 2)) * 100}%`;
+      faceBox.style.width = `${bw * 100}%`; faceBox.style.height = `${bh * 100}%`;
+    };
+    coverPick.addEventListener('click', (e) => {
+      const r = coverPick.getBoundingClientRect();
+      face = `${((e.clientX - r.left) / r.width).toFixed(3)},${((e.clientY - r.top) / r.height).toFixed(3)}`;
+      showFace.checked = true; placeBox(); drawSpine();
+    });
+    showFace.addEventListener('change', () => { face = showFace.checked ? (face === 'none' ? '' : face) : 'none'; placeBox(); drawSpine(); });
+    if (book.hasCover) store.coverUrl(book).then((url) => { if (!url) return; coverSrc = url; coverPick.prepend(h('img', { src: url, alt: '', draggable: false })); drawSpine(); }).catch(() => {});
+    else coverPick.classList.add('is-empty');
     const description = h('textarea.field.is-area', { value: book.description || '', maxLength: 8000, rows: 5, placeholder: '这本书讲了什么？' });
     const descStatus = h('p.field-hint', { role: 'status' });
     const review = h('textarea.field.is-area', { value: book.review || '', maxLength: 5000, rows: 4, placeholder: '读完有什么想说的？' });
@@ -888,6 +975,8 @@ function editBook(id) {
     const series = h('input.field', { type: 'text', value: book.series || '', maxLength: 200, placeholder: '不属于系列就留空', list: 'series-names' });
     const volume = h('input.field', { type: 'number', value: book.volume ?? '', min: 0, step: 'any', placeholder: '例如 3', inputMode: 'decimal' });
     const names = [...new Set(Object.values(state.books).map((b) => b.series).filter(Boolean))];
+    for (const f of [title, author, series, volume]) f.addEventListener('input', drawSpine);
+    queueMicrotask(() => { drawSpine(); placeBox(); });
     return h('form.dialog-body', {
       onsubmit: async (e) => {
         e.preventDefault();
@@ -895,6 +984,7 @@ function editBook(id) {
           title: title.value, author: author.value, illustrator: illustrator.value.trim(), publisher: publisher.value.trim(), status,
           rating, review: review.value.trim(), description: description.value.trim(),
           series: series.value.trim(), volume: volume.value === '' ? null : Number(volume.value),
+          imprint, published: normDate(published.value), spineFace: face,
         };
         if (await guard(() => store.updateBook(id, patch), '已保存')) { close(); exitSelect(false); renderAll(); }
       },
@@ -903,7 +993,10 @@ function editBook(id) {
     h('div.field-pair.is-even',
       h('div', h('label.field-label', '作者'), author),
       h('div', h('label.field-label', '插画'), illustrator)),
-    h('label.field-label', '出版社'), publisher,
+    h('div.field-pair.is-date',
+      h('div', h('label.field-label', '出版社 / 文库'), combo),
+      h('div', h('label.field-label', '出版时间'), published)),
+    pubTag,
     h('div.label-row', h('label.field-label', '简介'),
       h('button.link-btn', { type: 'button', onclick: () => fillWithAi(description, descStatus, { kind: 'book', title: book.title, author: author.value, illustrator: illustrator.value, publisher: publisher.value, volume: book.volume, existing: book.description }) }, icon('sparkle', 16), '让助手写')),
     description, descStatus,
@@ -913,6 +1006,11 @@ function editBook(id) {
       h('div', h('label.field-label', '卷号'), volume)),
     h('datalist', { id: 'series-names' }, names.map((n) => h('option', { value: n }))),
     h('p.field-hint', '填了系列和卷号，书架上会显示成“系列名 + 卷号”，同系列的书会叠在一起并按卷号排序。'),
+    h('label.field-label', '书脊'),
+    h('div.spine-edit', spineHost,
+      h('div.spine-side', coverPick,
+        h('label.check-row', showFace, '书脊上显示人物小图'),
+        h('p.field-hint', '点封面选人物小图的位置。书脊样式按“出版社 / 文库”自动选，是软件里的示意，不是真实书脊的复刻。'))),
     h('label.field-label', '我的评分'), stars,
     h('label.field-label', '书评'), review,
     h('div.dialog-actions',

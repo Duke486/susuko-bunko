@@ -4,6 +4,7 @@
 import { h } from './ui.js';
 import { extractColor, hexToOklch } from './theme.js';
 import { prefs } from './store.js';
+import { buildSpine } from './spine.js';
 
 const colorCache = prefs.get('spineColors', {});
 let saveTimer = null;
@@ -18,7 +19,7 @@ function rememberColor(key, color) {
 }
 
 /**
- * items: [{ key, book, title, sub, volume, colorKey, fallbackHue, reading }]
+ * items: [{ key, book, title, spine: {书脊信息，见 spine.js}, colorKey, fallbackHue }]
  * opts: { index, coverUrl(book) → Promise<url>, onFocus(i), onOpen(i) }
  */
 export function mountShelf(host, items, opts) {
@@ -34,20 +35,14 @@ export function mountShelf(host, items, opts) {
 
   const books = items.map((it, i) => {
     const front = h('div.b3d-face.b3d-front', h('div.b3d-cover', h('span', it.title)));
-    const spine = () => h('div.b3d-face.b3d-spine',
-      h('span.b3d-band'),
-      it.volume != null && h('span.b3d-vol', String(it.volume)),
-      h('span.b3d-title', it.title),
-      it.reading && h('span.b3d-mark'),
-      h('span.b3d-band.is-bottom'));
+    const left = buildSpine(it.spine, 'b3d-face.b3d-spine.is-left');
+    const right = buildSpine(it.spine, 'b3d-face.b3d-spine.is-right');
     const el = h('div.b3d', { role: 'option', 'aria-label': it.title, style: `--hue:${it.fallbackHue}` },
-      front, spine(), spine(), h('div.b3d-face.b3d-top'));
-    el.lastChild.previousSibling.classList.add('is-right');
-    el.children[1].classList.add('is-left');
+      front, left.el, right.el, h('div.b3d-face.b3d-top'));
     track.append(el);
     const color = colorCache[it.colorKey];
     if (color) paint(el, color);
-    return { el, front, loaded: false };
+    return { el, front, spines: [left, right], loaded: false };
   });
 
   function paint(el, color) {
@@ -65,6 +60,7 @@ export function mountShelf(host, items, opts) {
       const img = h('img', { src: url, alt: '', draggable: false });
       img.addEventListener('load', () => {
         b.front.firstChild.replaceWith(img);
+        for (const sp of b.spines) sp.setCover(url);
         if (!colorCache[it.colorKey]) extractColor(img).then((c) => { rememberColor(it.colorKey, c); paint(b.el, c); }).catch(() => {});
       }, { once: true });
     }).catch(() => {});
@@ -94,7 +90,7 @@ export function mountShelf(host, items, opts) {
       const el = books[i].el;
       if (a > reach) { el.style.display = 'none'; continue; }
       el.style.display = '';
-      if (a < 3) loadCover(i);
+      loadCover(i); // 侧着的书书脊上也有人物小图，所以看得见的都要加载封面
       const t = Math.min(a, 1);
       const x = a <= 1 ? s * a * near : s * (near + (a - 1) * (T + 5 * K));
       const z = (a <= 1 ? -a * 70 : -70 - (a - 1) ** 1.25 * 16) * K; // 越往两边越往后退，摆成一道弧

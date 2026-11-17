@@ -21,7 +21,7 @@ const OPEN_SIGNUP = process.env.OPEN_SIGNUP === '1';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const APP_DIR = path.resolve(process.env.APP_DIR || path.join(__dirname, '..', 'app'));
 const MAX_BOOK_BYTES = Number(process.env.MAX_BOOK_MB || 2048) * 1024 * 1024;
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 
 if (!KEY || KEY.length < 8) {
   console.error('请先设置邀请码（至少 8 位）：SHIORI_KEY=xxxxxxxx node server.js');
@@ -258,6 +258,8 @@ async function uploadBook(req, res, q, lib) {
   json(res, 201, { book });
 }
 
+// 出版时间：只收 2024 / 2024-07 / 2024-07-18 这三种写法
+const dateOf = (v) => (/^\d{4}(-\d{2}(-\d{2})?)?$/.test(String(v).trim()) ? String(v).trim() : '');
 function patchBook(book, body, lib) {
   if (typeof body.title === 'string' && str(body.title)) book.title = str(body.title);
   if (typeof body.author === 'string') book.author = str(body.author);
@@ -268,6 +270,9 @@ function patchBook(book, body, lib) {
   if (typeof body.review === 'string') book.review = str(body.review, 5000);
   if (['', 'reading', 'finished'].includes(body.status)) book.status = body.status; // 空 = 按进度自动判断
   if (typeof body.series === 'string') book.series = str(body.series, 200);
+  if (typeof body.imprint === 'string') book.imprint = str(body.imprint, 40);
+  if (typeof body.published === 'string') book.published = dateOf(body.published);
+  if (typeof body.spineFace === 'string') book.spineFace = /^(none|[01](\.\d{1,3})?,[01](\.\d{1,3})?)?$/.test(body.spineFace) ? body.spineFace : '';
   if ('volume' in body) book.volume = volumeOf(body.volume);
   if (!book.series) book.volume = null;
   if (Array.isArray(body.collections)) book.collections = [...new Set(body.collections.filter((c) => lib.collections[c]))];

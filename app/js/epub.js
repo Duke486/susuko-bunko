@@ -49,6 +49,10 @@ export class Epub {
     this.illustrator = people.filter((x) => x.role === 'ill').map((x) => x.name).join('、');
     this.language = text('language');
     this.publisher = text('publisher');
+    // 出版时间：dc:date 有很多写法，只留年月日；Calibre 用 0101 年表示“不知道”
+    const date = (byTag(opf, 'date').find((n) => /publication/i.test(n.getAttribute('opf:event') || '')) || byTag(opf, 'date')[0])?.textContent.trim() || '';
+    const m = date.match(/^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?/);
+    this.published = m && +m[1] >= 1950 ? [m[1], m[2], m[3]].filter(Boolean).join('-') : '';
     // 简介：dc:description 里常常是转义过的 HTML，转成纯文本并保留分段
     const rawDesc = text('description');
     if (rawDesc) {

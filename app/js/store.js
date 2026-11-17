@@ -665,7 +665,7 @@ async function inspect(file) {
     const cover = await epub.coverBlob().catch(() => null);
     const title = epub.title || name;
     const guess = epub.series ? { series: epub.series, volume: epub.volume } : guessSeries(title);
-    return { format: 'epub', title, author: epub.author, illustrator: epub.illustrator, publisher: epub.publisher, description: epub.description, cover, ...guess };
+    return { format: 'epub', title, author: epub.author, illustrator: epub.illustrator, publisher: epub.publisher, description: epub.description, published: epub.published, cover, ...guess };
   }
   if (ext === 'cbz' || ext === 'zip') {
     const zip = await ZipReader.open(file);
@@ -687,6 +687,9 @@ function patchLocal(book, body) {
   if (typeof body.title === 'string' && body.title.trim()) book.title = str(body.title, 500);
   if (Number.isInteger(body.rating) && body.rating >= 0 && body.rating <= 5) book.rating = body.rating;
   if (['', 'reading', 'finished'].includes(body.status)) book.status = body.status;
+  if (typeof body.imprint === 'string') book.imprint = str(body.imprint, 40);
+  if (typeof body.published === 'string') book.published = /^\d{4}(-\d{2}(-\d{2})?)?$/.test(body.published.trim()) ? body.published.trim() : '';
+  if (typeof body.spineFace === 'string') book.spineFace = body.spineFace;
   if ('volume' in body) book.volume = body.volume === null || body.volume === '' || !Number.isFinite(Number(body.volume)) ? null : Number(body.volume);
   if (!book.series) book.volume = null;
   if (Array.isArray(body.collections)) book.collections = [...new Set(body.collections.filter((c) => state.collections[c]))];
@@ -696,7 +699,7 @@ function patchLocal(book, body) {
 /** 导入一本书：本地解析书名、封面和简介 → 账号模式上传到服务器，本机模式直接存下 → 都留一份在本机 */
 export async function importBook(file, collectionIds = []) {
   const info = await inspect(file);
-  const extra = { description: info.description || '' };
+  const extra = { description: info.description || '', ...(info.published ? { published: info.published } : {}) };
   let saved, duplicate = false, jpg = null;
   if (info.cover) jpg = await shrinkCover(info.cover).catch(() => null);
   if (account()) {
@@ -711,7 +714,7 @@ export async function importBook(file, collectionIds = []) {
         try { saved = (await (await api(`/api/books/${saved.id}/cover`, { method: 'PUT', body: jpg })).json()).book; }
         catch { /* 封面失败不影响书 */ }
       }
-      if (extra.description) saved = (await apiJson('/api/books/' + saved.id, 'PATCH', extra).catch(() => ({ book: saved }))).book;
+      if (extra.description || extra.published) saved = (await apiJson('/api/books/' + saved.id, 'PATCH', extra).catch(() => ({ book: saved }))).book;
     }
   } else {
     const dup = Object.values(state.books).find((b) => b.size === file.size && b.fileName === file.name);
@@ -719,7 +722,7 @@ export async function importBook(file, collectionIds = []) {
     const now = Date.now();
     saved = {
       id: randomId(), format: info.format, size: file.size, title: info.title, author: info.author || '',
-      illustrator: info.illustrator || '', publisher: info.publisher || '', description: extra.description, status: '', rating: 0, review: '',
+      illustrator: info.illustrator || '', publisher: info.publisher || '', description: extra.description, published: extra.published || '', status: '', rating: 0, review: '',
       series: info.series || '', volume: info.volume ?? null, fileName: file.name,
       collections: collectionIds.filter((c) => state.collections[c]), hasCover: !!jpg, coverAt: jpg ? now : 0, addedAt: now, updatedAt: now,
     };
@@ -805,6 +808,7 @@ export async function uploadLocalLibrary(onStep) {
       }
       book = (await apiJson('/api/books/' + book.id, 'PATCH', {
         description: b.description || '', status: b.status || '', rating: b.rating || 0, review: b.review || '',
+        imprint: b.imprint || '', published: b.published || '', spineFace: b.spineFace || '',
         collections: (b.collections || []).map((c) => colMap[c]).filter(Boolean),
       })).book;
       idMap[b.id] = book.id;
