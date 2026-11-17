@@ -20,13 +20,16 @@ const FONTS = {
 };
 const DEFAULTS = {
   fontSize: 18, lineHeight: 1.8, marginPx: 24, para: 0, font: 'book', paper: 'auto',
-  spread: true, flow: 'paged', writing: 'h', turn: 'float', volumeKeys: true, hlColor: 'blue',
+  spread: true, flow: 'paged', writing: 'h', turn: 'rise', volumeKeys: true, hlColor: 'blue',
+  hlStyle: 'line', tapMode: 'lr', turnSpeed: 1, selUnit: 'word', autoSec: 30,
 };
 export function readerSettings() {
   const saved = prefs.get('reader', {});
   const s = { ...DEFAULTS, ...saved };
   if (saved.marginPx == null && saved.margin != null) s.marginPx = [14, 24, 38][saved.margin] ?? 24; // 旧版的三档页边距
-  if (!saved.animV) { s.turn = 'float'; s.animV = 1; } // 0.5 起默认用“浮现”的文字过渡
+  if ((saved.animV || 0) < 2) { if (!saved.turn || saved.turn === 'float') s.turn = 'rise'; s.animV = 2; } // 0.7 起默认“逐段浮现”
+  if (saved.haptic == null) s.haptic = !!window.matchMedia?.('(pointer: coarse)').matches; // 手机、平板默认翻页轻震
+  if (!['line', 'wave', 'marker'].includes(s.hlStyle)) s.hlStyle = 'line';
   if (s.paper !== 'auto' && !PAPERS[s.paper]) s.paper = 'white';
   if (!HL_COLORS[s.hlColor]) s.hlColor = 'blue';
   return s;
@@ -65,6 +68,8 @@ export async function open({ host, book, title = book.title, source, progress, o
   const toc = h('aside.reader-toc', { hidden: true }, h('h2', '目录'), tocList);
   const scrim = h('div.reader-scrim', { hidden: true, onclick: closePanels });
   const player = h('div.tts-pill', { hidden: true, role: 'region', 'aria-label': '听书' });
+  const searchPanel = h('div.reader-sheet.search-sheet', { hidden: true, role: 'dialog', 'aria-label': '全书搜索' });
+  const autoPill = h('div.auto-pill', { hidden: true, role: 'status' });
   const markBtn = h('button.icon-btn', { type: 'button', onclick: toggleBookmark });
   const nightBtn = menuButton('moon', '夜间', toggleNight);
   const root = h('div.reader',
@@ -84,10 +89,11 @@ export async function open({ host, book, title = book.title, source, progress, o
       h('div.bottom-actions',
         menuButton('list', '目录', () => openPanel(toc)),
         menuButton('bookmark', '书签', () => openSheet('marks')),
+        menuButton('search', '搜索', openSearch),
         menuButton('headphones', '听书', () => { toggleChrome(false); startTts(); }),
         nightBtn,
         menuButton('type', '设置', () => openSheet('type')))),
-    player, scrim, toc, sheet, aiPanel);
+    player, autoPill, scrim, toc, sheet, aiPanel, searchPanel);
   host.replaceChildren(root);
   applyPaper();
 
@@ -150,7 +156,14 @@ img,svg,video{max-width:100%!important;max-height:${H - padV * 2}px!important;ob
     }
     const custom = settings.paper === 'auto' ? p !== PAPERS.white : settings.paper !== 'white';
     const a = p.dark ? 0.32 : 0.42;
-    const hl = Object.entries(HL_COLORS).map(([k, c]) => `::highlight(shl-${k}){background-color:color-mix(in srgb,${c} ${a * 100}%,transparent)}`).join('\n');
+    const marker = settings.hlStyle === 'marker', wave = settings.hlStyle === 'wave';
+    const ink = (c) => (p.dark ? c : `color-mix(in srgb,${c} 78%,#1d2433)`); // 浅色纸上线条稍微压深一点，才看得清
+    const hl = Object.entries(HL_COLORS).map(([k, c]) => (marker
+      ? `::highlight(shl-${k}){background-color:color-mix(in srgb,${c} ${a * 100}%,transparent)}`
+      : `::highlight(shl-${k}){text-decoration:underline ${wave ? 'wavy' : 'solid'} ${ink(c)};text-decoration-thickness:${wave ? 1.5 : 2.5}px;text-underline-offset:${wave ? 4 : 5}px;text-decoration-skip-ink:none}`)).join('\n');
+    const noteCss = marker
+      ? `text-decoration:underline dotted ${p.accent};text-decoration-thickness:2px;text-underline-offset:4px`
+      : `background-color:color-mix(in srgb,${p.accent} ${p.dark ? 16 : 10}%,transparent)`;
     return `${layout}
 ${isVertical() ? '' : '*{writing-mode:horizontal-tb!important;text-combine-upright:none!important}'}
 p,li,dd,blockquote{line-height:inherit!important;orphans:1;widows:1}
@@ -159,7 +172,7 @@ a{color:${p.accent}!important;text-decoration:none!important}
 ${custom ? `body *{color:inherit!important;background-color:transparent!important;border-color:currentColor!important}body a{color:${p.accent}!important}` : ''}
 ${font.css ? `body,body *{font-family:${font.css}!important}` : ''}
 ${hl}
-::highlight(shl-note){text-decoration:underline dotted ${p.accent};text-decoration-thickness:2px;text-underline-offset:4px}
+::highlight(shl-note){${noteCss}}
 ::highlight(shl-sel){background-color:color-mix(in srgb,${p.accent} 26%,transparent)}
 ::highlight(shl-tts){background-color:color-mix(in srgb,${p.accent} 16%,transparent);text-decoration:underline ${p.accent};text-decoration-thickness:2px;text-underline-offset:5px}
 ::highlight(shl-flash){background-color:color-mix(in srgb,#F5A524 60%,transparent)}`;
@@ -210,7 +223,7 @@ ${hl}
     const win = frameWin(), from = win.scrollX, token = ++slideToken;
     const dist = x - from;
     if (!dist) return;
-    const dur = Math.min(320, 160 + Math.abs(dist) / 6), t0 = performance.now();
+    const dur = Math.min(320, 160 + Math.abs(dist) / 6) * speed(), t0 = performance.now();
     const step = (now) => {
       if (token !== slideToken || destroyed) return;
       const t = Math.min(1, (now - t0) / dur), ease = 1 - (1 - t) ** 3;
@@ -219,27 +232,55 @@ ${hl}
     };
     requestAnimationFrame(step);
   }
+  const speed = () => Number(settings.turnSpeed) || 1;
   function floatIn(dir, strength = 1) {
     frame.animate([
       { opacity: 0, filter: `blur(${5 * strength}px)`, transform: `translate(${dir * 14 * strength}px, ${4 * strength}px)` },
       { opacity: 1, filter: 'blur(0)', transform: 'none' },
-    ], { duration: 300, easing: 'cubic-bezier(.2,.7,.2,1)' });
+    ], { duration: 300 * speed(), easing: 'cubic-bezier(.2,.7,.2,1)' });
   }
+  function fadeIn() { frame.animate([{ opacity: 0.15 }, { opacity: 1 }], { duration: 200 * speed(), easing: 'ease-out' }); }
+  // 逐段浮现：这一页上的段落一段接一段地浮上来
+  let riseAnims = [];
+  const RISE = 'p, h1, h2, h3, h4, h5, h6, li, blockquote, figure, dt, dd, img, svg, table, hr';
+  function riseIn(dir) {
+    for (const a of riseAnims) a.finish();
+    riseAnims = [];
+    const doc = frameDoc();
+    if (!doc?.body) return;
+    const vw = frameWin().innerWidth, vh = frameWin().innerHeight;
+    const seen = [];
+    for (const el of doc.body.querySelectorAll(RISE)) {
+      if (el.parentElement?.closest(RISE)) continue; // 只动最外层的块，避免嵌套的一起抖
+      const r = el.getBoundingClientRect();
+      if (r.width && r.height && r.right > 0 && r.left < vw && r.bottom > 0 && r.top < vh) seen.push(el);
+      if (seen.length >= 28) break;
+    }
+    if (!seen.length) { floatIn(dir); return; }
+    if (isVertical()) seen.sort((a, b) => b.getBoundingClientRect().right - a.getBoundingClientRect().right);
+    const k = speed(), shift = isVertical() ? 'translateX(-10px)' : `translate(${dir * 6}px, 10px)`;
+    seen.forEach((el, i) => riseAnims.push(el.animate([{ opacity: 0, transform: shift }, { opacity: 1, transform: 'none' }],
+      { duration: 340 * k, delay: Math.min(i, 12) * 32 * k, easing: 'cubic-bezier(.2,.7,.2,1)', fill: 'backwards' })));
+  }
+  function buzz() { if (settings.haptic) try { navigator.vibrate?.(7); } catch { /* 不支持就算了 */ } }
   function show(p, save = true, animate = false) {
     const before = page;
     page = Math.min(pages - 1, Math.max(0, p));
     const style = animate && page !== before ? turnStyle() : 'none';
     const dir = page > before ? 1 : -1;
+    if (animate && page !== before) buzz();
     if (isVertical()) {
       frameWin()?.scrollTo(0, page * H);
-      if (style === 'slide' || style === 'float') floatIn(-dir); // 竖排从右往左翻：下一页从左边进来
-      else if (style === 'fade') frame.animate([{ opacity: 0.15 }, { opacity: 1 }], { duration: 200, easing: 'ease-out' });
+      if (style === 'rise') riseIn(-dir);
+      else if (style === 'slide' || style === 'float') floatIn(-dir); // 竖排从右往左翻：下一页从左边进来
+      else if (style === 'fade') fadeIn();
     } else if (style === 'slide') slideTo(page * W);
     else {
       slideToken++;
       frameWin()?.scrollTo(page * W, 0);
-      if (style === 'float') floatIn(dir);
-      else if (style === 'fade') frame.animate([{ opacity: 0.15 }, { opacity: 1 }], { duration: 200, easing: 'ease-out' });
+      if (style === 'rise') riseIn(dir);
+      else if (style === 'float') floatIn(dir);
+      else if (style === 'fade') fadeIn();
     }
     clearSelection();
     refresh(save);
@@ -327,7 +368,13 @@ ${hl}
     if (doc.caretPositionFromPoint) { const p = doc.caretPositionFromPoint(x, y); if (!p) return null; node = p.offsetNode; off = p.offset; }
     else { const r = doc.caretRangeFromPoint?.(x, y); if (!r) return null; node = r.startContainer; off = r.startOffset; }
     if (node.parentElement?.closest('.shiori-nav')) return null;
-    return offsetOf(node, off);
+    const at = offsetOf(node, off);
+    // 浏览器给的是“最近的字缝”：点在一个字的右半边时会落到下一个字上，这里纠正回被点中的那个字
+    if (at > 0) {
+      const b = rangeOf(at - 1, at)?.getBoundingClientRect();
+      if (b && x >= b.left && x <= b.right && y >= b.top && y <= b.bottom) return at - 1;
+    }
+    return at;
   }
   /** 这一点是否真的落在文字上（而不是页边空白） */
   function onText(x, y, off) {
@@ -347,13 +394,33 @@ ${hl}
     }
     return [off, off + 1];
   }
-  function sentenceAround(start, end) { // 选中文字所在的整句，查词时给模型当上下文
+  function sentenceBounds(start, end, limit = 160) {
     const t = tmap.text, brk = new Set(tmap.breaks);
     let a = start, b = end;
-    while (a > 0 && start - a < 160 && !brk.has(a) && !/[。！？!?\n]/.test(t[a - 1])) a--;
-    while (b < t.length && b - end < 160 && !brk.has(b) && !/[。！？!?\n]/.test(t[b])) b++;
-    if (b < t.length && !brk.has(b)) b++;
-    return t.slice(a, b).replace(/\s+/g, ' ').trim();
+    while (a > 0 && start - a < limit && !brk.has(a) && !/[。！？!?\n]/.test(t[a - 1])) a--;
+    while (b < t.length && b - end < limit && !brk.has(b) && !/[。！？!?\n]/.test(t[b])) b++;
+    while (b < t.length && !brk.has(b) && /[。！？!?…」』）)”’]/.test(t[b])) b++; // 把句号和收尾的引号一起带上
+    return trimBounds(a, b);
+  }
+  function paraBounds(off) {
+    let a = 0, b = tmap.total;
+    for (const k of tmap.breaks) { if (k <= off) a = k; else { b = k; break; } }
+    return trimBounds(a, b);
+  }
+  function trimBounds(a, b) {
+    const t = tmap.text;
+    while (a < b && /\s|\u3000/.test(t[a])) a++;
+    while (b > a && /\s|\u3000/.test(t[b - 1])) b--;
+    return [a, Math.max(a + 1, b)];
+  }
+  function unitBounds(off, unit = settings.selUnit) {
+    if (unit === 'sentence') return sentenceBounds(off, off + 1);
+    if (unit === 'para') return paraBounds(off);
+    return wordAt(off);
+  }
+  function sentenceAround(start, end) { // 选中文字所在的整句，查词时给模型当上下文
+    const [a, b] = sentenceBounds(start, end);
+    return tmap.text.slice(a, b).replace(/\s+/g, ' ').trim();
   }
   /** 当前画面里第一个字的位置 */
   function firstVisibleOffset() {
@@ -483,10 +550,12 @@ ${hl}
       if (token === loadToken) {
         frame.style.visibility = ''; busy = false;
         const style = turnStyle();
-        if (style === 'float') floatIn(isScroll() ? 0 : dir * (isVertical() ? -1 : 1), 1.4);
+        if (dir) buzz();
+        if (style === 'rise') riseIn(isScroll() ? 0 : dir * (isVertical() ? -1 : 1));
+        else if (style === 'float') floatIn(isScroll() ? 0 : dir * (isVertical() ? -1 : 1), 1.4);
         else if (style !== 'none') {
           const shift = style === 'slide' && !isScroll() ? dir * 48 * (isVertical() ? -1 : 1) : 0;
-          frame.animate([{ opacity: 0, transform: `translateX(${shift}px)` }, { opacity: 1, transform: 'none' }], { duration: 220, easing: 'ease-out' });
+          frame.animate([{ opacity: 0, transform: `translateX(${shift}px)` }, { opacity: 1, transform: 'none' }], { duration: 220 * speed(), easing: 'ease-out' });
         }
       }
     }
@@ -566,12 +635,12 @@ ${hl}
   function openPanel(panel) {
     toggleChrome(false);
     clearSelection();
-    for (const p of [toc, sheet, aiPanel]) p.hidden = p !== panel;
+    for (const p of [toc, sheet, aiPanel, searchPanel]) p.hidden = p !== panel;
     scrim.hidden = false;
     if (panel === toc) tocList.querySelector('.is-current')?.scrollIntoView({ block: 'center' });
   }
   function closePanels() {
-    toc.hidden = true; sheet.hidden = true; scrim.hidden = true;
+    toc.hidden = true; sheet.hidden = true; scrim.hidden = true; searchPanel.hidden = true;
     if (!aiPanel.hidden) { aiPanel.hidden = true; aiAbort?.abort(); }
   }
   const panelOpen = () => !scrim.hidden;
@@ -601,6 +670,7 @@ ${hl}
   }
   /** 单击：链接 → 划线 → 左右翻页 / 中间呼出菜单。x、y 为相对书页的坐标 */
   function tapAt(lx, ly, target) {
+    if (autoTimer) { stopAuto(); toast('已停止自动翻页'); return; }
     if (chromeOpen()) { toggleChrome(false); return; }
     if (sel) { clearSelection(); return; }
     if (followLink(target)) return;
@@ -616,7 +686,9 @@ ${hl}
       return;
     }
     const x = lx / W;
-    if (x < 0.3) leftward(); else if (x > 0.7) rightward(); else toggleChrome(true);
+    if (x >= 0.3 && x <= 0.7) toggleChrome(true);
+    else if (settings.tapMode === 'next') next(); // 两侧都是下一页：单手拿手机时更顺手
+    else if (x < 0.3) leftward(); else rightward();
   }
 
   // ---------- 选字 ----------
@@ -685,10 +757,16 @@ ${hl}
         act('translate', '翻译', () => askAi('translate')),
         act('trash', '删除', () => { removeMark(book.id, m.id); clearSelection(); paintHighlights(); toast('已删除划线'); }));
     } else {
+      const origin = sel.origin ?? sel.start;
+      const units = !sel.anchor && h('div.sel-units', { role: 'group', 'aria-label': '选取范围' }, [['word', '词'], ['sentence', '句'], ['para', '段']].map(([k, t]) => h('button' + (settings.selUnit === k ? '.is-on' : ''), {
+        type: 'button', 'aria-pressed': String(settings.selUnit === k),
+        onclick: (e) => { e.stopPropagation(); change({ selUnit: k }, false); const [a, b] = unitBounds(origin, k); selectRange(a, b); if (sel) sel.origin = origin; },
+      }, t)));
       selMenu.replaceChildren(
+        units || '', units ? h('span.sel-sep') : '',
         act('copy', '复制', () => copySel()),
         act('highlighter', '划线', () => addHighlight()),
-        act('pen', '批注', () => annotate(addHighlight(false))),
+        act('pen', '批注', () => annotateSelection()),
         act('dict', '查词', () => askAi('lookup')),
         act('translate', '翻译', () => askAi('translate')),
         act('sparkle', '问助手', () => askAi('ask')),
@@ -700,28 +778,45 @@ ${hl}
     clearSelection();
     try { await navigator.clipboard.writeText(t); toast('已复制'); } catch { toast('复制失败', { error: true }); }
   }
-  function addHighlight(announce = true) {
-    if (!sel) return null;
-    const { start, end } = sel;
-    const mark = saveMark(book.id, {
+  const excerptOf = (start, end) => tmap.text.slice(start, end).replace(/\s+/g, ' ').trim().slice(0, 2000);
+  function createHighlight(start, end, text = '') {
+    return saveMark(book.id, {
       type: 'highlight', color: settings.hlColor,
       loc: { index, start, end, fraction: fractionNow() },
       percent: epub.percentAt(index, start / Math.max(1, tmap.total)),
-      chapter: chapterTitle(), excerpt: tmap.text.slice(start, end).replace(/\s+/g, ' ').trim().slice(0, 2000),
+      chapter: chapterTitle(), excerpt: excerptOf(start, end), ...(text ? { text } : {}),
     });
+  }
+  function addHighlight(announce = true) {
+    if (!sel) return null;
+    const mark = createHighlight(sel.start, sel.end);
     clearSelection();
     paintHighlights();
     if (announce) toast('已划线，点划线可以改颜色或写批注');
     return mark;
   }
-  function annotate(mark) {
+  function annotateSelection() {
+    if (!sel) return;
+    const { start, end } = sel;
+    const chapterAt = index;
+    annotate({ excerpt: excerptOf(start, end) }, (text) => {
+      if (index !== chapterAt) return; // 写批注的时候换了章，位置就对不上了
+      createHighlight(start, end, text);
+    });
+  }
+  function annotate(mark, create) {
     if (!mark) return;
     clearSelection();
     return dialog(mark.text ? '修改批注' : '写批注', (close) => {
       const area = h('textarea.field.is-area', { value: mark.text || '', rows: 5, maxLength: 5000, placeholder: '写下你的想法…' });
       setTimeout(() => area.focus(), 40);
       return h('form.dialog-body', {
-        onsubmit: (e) => { e.preventDefault(); saveMark(book.id, { ...mark, text: area.value.trim() }); paintHighlights(); close(); toast('批注已保存'); },
+        onsubmit: (e) => {
+          e.preventDefault();
+          const text = area.value.trim();
+          if (create) { if (!text) { close(); return; } create(text); } else saveMark(book.id, { ...mark, text });
+          paintHighlights(); close(); toast('批注已保存');
+        },
       },
       h('blockquote.note-quote', mark.excerpt),
       area,
@@ -817,6 +912,98 @@ ${hl}
     }
     return out;
   }
+  // ---------- 全书搜索 ----------
+  const textCache = new Map();
+  const search = { q: '', results: [], done: 0, token: 0, input: null, list: null, status: null };
+  function openSearch() {
+    openPanel(searchPanel);
+    if (!search.input) {
+      search.input = h('input.field', { type: 'search', placeholder: '在这本书里搜索…', enterkeyhint: 'search', 'aria-label': '搜索内容' });
+      let t = null;
+      search.input.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => runSearch(search.input.value), 350); });
+      search.input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(t); runSearch(search.input.value); } });
+      search.status = h('p.search-status');
+      search.list = h('div.search-list');
+      searchPanel.replaceChildren(
+        h('div.sheet-head', h('h2', '全书搜索'), h('button.icon-btn', { type: 'button', 'aria-label': '关闭', onclick: closePanels }, icon('close'))),
+        h('div.search-box', icon('search', 18), search.input),
+        search.status, search.list);
+    }
+    setTimeout(() => { search.input.focus(); search.input.select(); }, 60);
+  }
+  async function chapterText(i) {
+    if (i === index && tmap.total) return tmap.text;
+    if (!textCache.has(i)) textCache.set(i, await epub.plainText(i, TEXT_SKIP).catch(() => ''));
+    return textCache.get(i);
+  }
+  async function runSearch(raw) {
+    const q = raw.trim();
+    const token = ++search.token;
+    search.q = q; search.results = [];
+    search.list.replaceChildren();
+    if (!q) { search.status.textContent = ''; return; }
+    const needle = q.toLowerCase();
+    const n = epub.spine.length;
+    let shown = 0;
+    for (let i = 0; i < n && search.results.length < 500; i++) {
+      search.status.textContent = `正在搜索… ${i + 1} / ${n} 章`;
+      const text = await chapterText(i);
+      if (token !== search.token || destroyed) return;
+      const low = text.toLowerCase();
+      for (let at = low.indexOf(needle); at >= 0 && search.results.length < 500; at = low.indexOf(needle, at + needle.length)) {
+        search.results.push({ index: i, start: at, end: at + q.length, before: text.slice(Math.max(0, at - 26), at), hit: text.slice(at, at + q.length), after: text.slice(at + q.length, at + q.length + 40) });
+      }
+      // 每搜完一章就把新结果画出来，长书也不用干等
+      const frag = document.createDocumentFragment();
+      let lastChapter = shown ? search.results[shown - 1].index : -1;
+      for (; shown < search.results.length; shown++) {
+        const r = search.results[shown];
+        if (r.index !== lastChapter) { lastChapter = r.index; const k = tocIndex(r.index); frag.append(h('div.search-chapter', k < 0 ? `第 ${r.index + 1} 部分` : epub.toc[k].label)); }
+        frag.append(h('button.search-hit', { type: 'button', onclick: () => jumpTo(r) }, h('span',
+          r.before.replace(/\s+/g, ' ').trimStart(), h('mark', r.hit), r.after.replace(/\s+/g, ' '))));
+      }
+      search.list.append(frag);
+      if (i % 4 === 3) await new Promise((res) => setTimeout(res)); // 让界面喘口气
+    }
+    if (token !== search.token) return;
+    search.status.textContent = search.results.length ? `找到 ${search.results.length >= 500 ? '500+' : search.results.length} 处` : '没有找到';
+  }
+  async function jumpTo(r) {
+    closePanels();
+    if (r.index !== index) await load(r.index, { offset: r.start }, true, Math.sign(r.index - index));
+    if (destroyed) return;
+    let { start, end } = r;
+    const q = r.hit.toLowerCase();
+    if (tmap.text.slice(start, end).toLowerCase() !== q) { // 万一偏了几个字，就在附近找一下
+      const near = tmap.text.toLowerCase().indexOf(q, Math.max(0, start - 200));
+      if (near < 0) return;
+      start = near; end = near + q.length;
+    }
+    revealOffset(start, true);
+    const range = rangeOf(start, end);
+    setTempHighlight('shl-flash', range);
+    setTimeout(() => { if (!destroyed) setTempHighlight('shl-flash', null); }, 1800);
+  }
+
+  // ---------- 自动翻页 ----------
+  let autoTimer = null;
+  function startAuto() {
+    stopAuto();
+    closePanels(); toggleChrome(false);
+    const sec = Number(settings.autoSec) || 30;
+    autoTimer = setInterval(() => {
+      if (destroyed) return stopAuto();
+      if (panelOpen() || sel || busy || document.hidden) return;
+      if (!isScroll() && page >= pages - 1 && index >= epub.spine.length - 1) { stopAuto(); toast('已经读到最后了'); return; }
+      next();
+      touchActivity();
+    }, sec * 1000);
+    autoPill.hidden = false;
+    autoPill.replaceChildren(icon('clock', 16), h('span', `自动翻页 · 每 ${sec} 秒`),
+      h('button', { type: 'button', onclick: (e) => { e.stopPropagation(); stopAuto(); } }, '停止'));
+  }
+  function stopAuto() { clearInterval(autoTimer); autoTimer = null; autoPill.hidden = true; }
+
   function drawPlayer() {
     player.hidden = !tts;
     if (!tts) return;
@@ -826,12 +1013,27 @@ ${hl}
       h('button.icon-btn', { type: 'button', 'aria-label': '停止听书', onclick: stopTts }, icon('stop', 18)),
       h('button.tts-main', { type: 'button', 'aria-label': tts.playing ? '暂停' : '继续', onclick: () => (tts.playing ? pauseTts() : resumeTts()) }, icon(tts.playing ? 'pause' : 'play', 18)),
       h('span.tts-text', h('span.tts-title', tts.playing ? '正在朗读' : '已暂停'), h('span.tts-line', cur ? cur.text : chapterTitle())),
+      h('button.tts-rate.tts-sleep' + (tts.sleep ? '.is-on' : ''), { type: 'button', 'aria-label': '定时停止', title: '定时停止', onclick: cycleSleep }, sleepLabel()),
       h('button.tts-rate', { type: 'button', 'aria-label': '语速', title: '语速', onclick: () => {
         const steps = [0.8, 1, 1.2, 1.5, 1.8, 2];
         const nxt = steps[(steps.findIndex((s) => s >= rate - 0.01) + 1) % steps.length];
         ai.saveTtsSettings({ rate: nxt }); drawPlayer();
         if (tts.playing) { ai.stopSpeaking(); }
       } }, `${rate.toFixed(1)}×`));
+  }
+  const SLEEPS = [null, 15, 30, 60, 'chapter'];
+  function cycleSleep() {
+    const k = SLEEPS.findIndex((v) => v === (tts.sleep?.mode ?? null));
+    const mode = SLEEPS[(k + 1) % SLEEPS.length];
+    tts.sleep = mode == null ? null : { mode, until: typeof mode === 'number' ? Date.now() + mode * 60000 : 0 };
+    toast(mode == null ? '已取消定时' : mode === 'chapter' ? '读完这一章就停' : `${mode} 分钟后停止朗读`);
+    drawPlayer();
+  }
+  function sleepLabel() {
+    const s = tts?.sleep;
+    if (!s) return '定时';
+    if (s.mode === 'chapter') return '本章';
+    return `${Math.max(1, Math.ceil((s.until - Date.now()) / 60000))} 分`;
   }
   async function startTts(fromOffset) {
     if (!ai.ttsAvailable()) { toast(ai.ttsSettings().engine === 'api' ? '请先在设置 → 阅读助手里填好接口' : '这台设备不支持朗读，可以在设置 → 听书里改用接口语音', { error: true }); return; }
@@ -847,7 +1049,9 @@ ${hl}
     const token = ++tts.token;
     while (tts && tts.playing && token === tts.token) {
       const cur = tts.sentences[tts.i];
+      if (tts.sleep?.until && Date.now() >= tts.sleep.until) { tts.sleep = null; pauseTts(); toast('定时到了，已暂停朗读'); return; }
       if (!cur) { // 本章读完：进下一章
+        if (tts.sleep?.mode === 'chapter') { tts.sleep = null; pauseTts(); toast('这一章读完了，已暂停朗读'); return; }
         if (index >= epub.spine.length - 1) { toast('全书读完了'); stopTts(); return; }
         await load(index + 1, {}, true, 1);
         if (!tts || token !== tts.token) return;
@@ -882,10 +1086,11 @@ ${hl}
   function beginSelectAt(lx, ly) {
     const off = caretAt(lx, ly);
     if (!onText(lx, ly, off)) return false;
-    const [a, b] = wordAt(off);
+    const [a, b] = unitBounds(off);
     navigator.vibrate?.(8);
     toggleChrome(false);
     selectRange(a, b);
+    if (sel) sel.origin = off;
     return true;
   }
   function extendSelectionTo(lx, ly) {
@@ -1019,10 +1224,11 @@ ${hl}
 
   function onKey(e) {
     if (document.querySelector('dialog[open], .viewer')) return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); openSearch(); return; }
     const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName);
     if (typing && !(e.key === 'Escape' && panelOpen())) return; // 输入框里按 Esc 也能关掉面板
     if (e.key === 'Escape') {
-      if (sel) clearSelection(); else if (panelOpen()) closePanels(); else if (chromeOpen()) toggleChrome(false); else if (tts) stopTts(); else onExit();
+      if (autoTimer) stopAuto(); else if (sel) clearSelection(); else if (panelOpen()) closePanels(); else if (chromeOpen()) toggleChrome(false); else if (tts) stopTts(); else onExit();
       return;
     }
     if (panelOpen()) return;
@@ -1151,7 +1357,7 @@ ${hl}
     prefs.set('reader', settings);
     applyPaper();
     const layoutChanged = LAYOUT_KEYS.some((k) => k in patch && patch[k] !== before[k]);
-    const colorChanged = 'paper' in patch && patch.paper !== before.paper;
+    const colorChanged = ('paper' in patch && patch.paper !== before.paper) || ('hlStyle' in patch && patch.hlStyle !== before.hlStyle);
     if (layoutChanged || colorChanged) {
       if (!relayoutQueued) {
         relayoutQueued = true;
@@ -1203,13 +1409,24 @@ ${hl}
       body = [
         seg('文字方向', 'writing', [['h', '横排'], ['v', '竖排']]),
         !isVertical() && seg('阅读方式', 'flow', [['paged', '左右翻页'], ['scroll', '上下滚动']]),
-        !isScroll() && seg('翻页动画', 'turn', [['float', '浮现'], ['slide', '滑动'], ['fade', '淡入'], ['none', '无']]),
+        !isScroll() && seg('翻页动画', 'turn', [['rise', '逐段浮现'], ['float', '浮现'], ['slide', '滑动'], ['none', '无']]),
+        !isScroll() && settings.turn !== 'none' && seg('动画速度', 'turnSpeed', [[1.5, '舒缓'], [1, '标准'], [0.6, '利落']]),
+        !isScroll() && seg('点屏幕两侧', 'tapMode', [['lr', '左右分别翻'], ['next', '都是下一页']]),
+        seg('划线样式', 'hlStyle', [['line', '直线'], ['wave', '波浪线'], ['marker', '荧光笔']]),
+        seg('长按选取', 'selUnit', [['word', '一个词'], ['sentence', '一句'], ['para', '一段']]),
+        'vibrate' in navigator && seg('翻页轻震', 'haptic', [[true, '开'], [false, '关']]),
+        h('div.sheet-row', h('span.sheet-label', '自动翻页'),
+          h('div.auto-row',
+            h('div.segmented', { role: 'group', 'aria-label': '自动翻页间隔' }, [15, 30, 60].map((v) => h('button' + (Number(settings.autoSec) === v ? '.is-on' : ''), {
+              type: 'button', onclick: () => change({ autoSec: v }),
+            }, `${v} 秒`))),
+            h('button.btn.is-soft', { type: 'button', onclick: autoTimer ? stopAuto : startAuto }, autoTimer ? '停止' : '开始'))),
         !isScroll() && !isVertical() && seg('宽屏双页', 'spread', [[true, '开'], [false, '关']]),
         native && h('div.sheet-row', h('span.sheet-label', '音量键翻页'),
           h('div.segmented', { role: 'group', 'aria-label': '音量键翻页' }, [[true, '开'], [false, '关']].map(([v, text]) => h('button' + (settings.volumeKeys === v ? '.is-on' : ''), {
             type: 'button', onclick: () => { change({ volumeKeys: v }); syncVolumeKeys(v); },
           }, text)))),
-        h('p.panel-note', `${isVertical() ? '竖排时从右往左读：点屏幕左侧是下一页，右侧是上一页。' : '点屏幕两侧翻页，点中间呼出菜单。'}长按文字可以选字，拖动两端调整范围；按住插画可以放大。`),
+        h('p.panel-note', `${settings.tapMode === 'next' ? '点屏幕左右两侧都翻到下一页，' : isVertical() ? '竖排时从右往左读：点屏幕左侧是下一页，右侧是上一页，' : '点屏幕两侧翻页，'}点中间呼出菜单。长按文字选取，选中后可以在菜单里切换词 / 句 / 段，拖动两端调整范围；按住插画可以放大。自动翻页时点一下屏幕就会停。`),
       ];
     } else if (tab === 'marks') {
       const on = !!bookmarkHere();
@@ -1246,7 +1463,7 @@ ${hl}
   return {
     async destroy() {
       destroyed = true;
-      stopTts();
+      stopTts(); stopAuto(); search.token++;
       aiAbort?.abort();
       observer.disconnect(); themeWatch.disconnect(); unsubscribe(); clock.stop();
       window.removeEventListener('keydown', onKey);

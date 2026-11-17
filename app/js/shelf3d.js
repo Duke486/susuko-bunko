@@ -70,11 +70,15 @@ export function mountShelf(host, items, opts) {
     }).catch(() => {});
   }
 
+  let K = 1; // 随书本大小缩放的系数
   function measure() {
-    const w = root.clientWidth;
-    CW = w < 520 ? 138 : w < 900 ? 160 : 184;
+    // 书本大小跟着可用的宽和高走：窗口放大，书也跟着放大，不会只缩在中间一小块
+    const w = root.clientWidth, hgt = root.clientHeight || 400;
+    CW = Math.round(Math.max(118, Math.min(w * 0.2, (hgt - 70) / 1.42, 460)));
     CH = Math.round(CW * 1.42);
     T = Math.round(CW * 0.2);
+    K = CW / 184;
+    root.style.setProperty('--persp', `${Math.round(CW * 6)}px`);
     root.style.setProperty('--cw', `${CW}px`);
     root.style.setProperty('--ch', `${CH}px`);
     root.style.setProperty('--t', `${T}px`);
@@ -82,8 +86,8 @@ export function mountShelf(host, items, opts) {
 
   const wrap = (d) => { d = ((d % n) + n) % n; return d >= n / 2 ? d - n : d; };
   function layout() {
-    const near = CW / 2 + T / 2 + 18; // 第一本侧放的书离中心多远
-    const reach = Math.min(12, Math.ceil(n / 2));
+    const near = CW / 2 + T / 2 + 18 * K; // 第一本侧放的书离中心多远
+    const reach = Math.min(Math.max(8, Math.ceil(root.clientWidth / (T + 5 * K) / 2)), Math.ceil(n / 2));
     for (let i = 0; i < n; i++) {
       const d = n === 1 ? 0 : wrap(i - pos);
       const a = Math.abs(d), s = Math.sign(d) || 1;
@@ -92,10 +96,10 @@ export function mountShelf(host, items, opts) {
       el.style.display = '';
       if (a < 3) loadCover(i);
       const t = Math.min(a, 1);
-      const x = a <= 1 ? s * a * near : s * (near + (a - 1) * (T + 5));
-      const z = a <= 1 ? -a * 70 : -70 - (a - 1) ** 1.25 * 16; // 越往两边越往后退，摆成一道弧
+      const x = a <= 1 ? s * a * near : s * (near + (a - 1) * (T + 5 * K));
+      const z = (a <= 1 ? -a * 70 : -70 - (a - 1) ** 1.25 * 16) * K; // 越往两边越往后退，摆成一道弧
       const rot = s * t * 78;
-      const lift = (1 - t) * -10; // 正中那本稍微抬起来
+      const lift = (1 - t) * -10 * K; // 正中那本稍微抬起来
       el.style.transform = `translate3d(${x}px, ${lift}px, ${z}px) rotateY(${rot}deg)`;
       el.style.zIndex = String(200 - Math.round(a * 10));
       el.style.setProperty('--shade', (Math.min(a, 8) * 0.045).toFixed(3));

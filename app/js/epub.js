@@ -261,6 +261,24 @@ export class Epub {
   }
 
   /** 解析章内链接，返回 { index, hash }；站外链接返回 null */
+  /** 第 index 章的纯文本（和阅读器里数字的方式一致），给全书搜索用 */
+  async plainText(index, skip) {
+    const source = await this.zip.text(this.spine[index].path);
+    let doc = new DOMParser().parseFromString(source, 'application/xhtml+xml');
+    if (doc.getElementsByTagName('parsererror').length || !doc.documentElement || doc.documentElement.localName !== 'html') {
+      doc = new DOMParser().parseFromString(source, 'text/html');
+    }
+    for (const el of doc.querySelectorAll('script, iframe, object, embed, base, meta[http-equiv]')) el.remove();
+    const body = doc.body || doc.querySelector('body');
+    if (!body) return '';
+    const walker = doc.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement?.closest(skip) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
+    let out = '';
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) out += n.data;
+    return out;
+  }
+
   resolveLink(fromIndex, href) {
     if (!href || /^[a-z][a-z0-9+.-]*:/i.test(href)) return null;
     const { path, hash } = resolvePath(this.spine[fromIndex].path, href);

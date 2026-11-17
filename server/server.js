@@ -21,7 +21,7 @@ const OPEN_SIGNUP = process.env.OPEN_SIGNUP === '1';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const APP_DIR = path.resolve(process.env.APP_DIR || path.join(__dirname, '..', 'app'));
 const MAX_BOOK_BYTES = Number(process.env.MAX_BOOK_MB || 2048) * 1024 * 1024;
-const VERSION = '0.5.0';
+const VERSION = '0.7.0';
 
 if (!KEY || KEY.length < 8) {
   console.error('请先设置邀请码（至少 8 位）：SHIORI_KEY=xxxxxxxx node server.js');
@@ -36,7 +36,7 @@ for (const d of [DATA_DIR, BOOKS_DIR, COVERS_DIR, AVATARS_DIR]) fs.mkdirSync(d, 
 
 // ---------- 数据库（一个 JSON 文件，原子写入） ----------
 // 结构：{ version: 2, users: { uid: 用户 }, tokens: { 令牌哈希: { uid } }, libs: { uid: 书库 }, legacy?: 旧版单人书库 }
-const emptyLib = () => ({ books: {}, collections: {}, progress: {}, marks: {}, stats: {} });
+const emptyLib = () => ({ books: {}, collections: {}, progress: {}, marks: {}, stats: {}, hours: {}, series: {}, settings: null });
 let db = { version: 2, users: {}, tokens: {}, libs: {} };
 if (fs.existsSync(DB_FILE)) {
   const raw = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
@@ -312,6 +312,7 @@ async function api(req, res, url) {
   const user = userOf(req);
   if (!user) return fail(res, 401, '登录已失效，请重新登录');
   const lib = db.libs[user.id] || (db.libs[user.id] = emptyLib());
+  for (const [k, v] of Object.entries(emptyLib())) if (!(k in lib)) lib[k] = v; // 旧书库补上新字段
 
   if (seg[0] === 'me') {
     if (seg.length === 1 && M === 'GET') return json(res, 200, { user: publicUser(user) });
@@ -326,6 +327,15 @@ async function api(req, res, url) {
       }
       save();
       return json(res, 200, { user: publicUser(user) });
+    }
+    // 账号设置（阅读器排版、主题色、阅读助手接口等）：整份覆盖，以较新的为准
+    if (seg[1] === 'settings' && M === 'GET') return json(res, 200, { settings: lib.settings });
+    if (seg[1] === 'settings' && M === 'PUT') {
+      const body = await readJson(req, 256 * 1024);
+      if (!body.data || typeof body.data !== 'object') return fail(res, 400, '设置格式不对');
+      const updatedAt = Math.min(Number(body.updatedAt) || Date.now(), Date.now() + 60000);
+      if (!lib.settings || updatedAt >= lib.settings.updatedAt) { lib.settings = { data: body.data, updatedAt }; save(); }
+      return json(res, 200, { settings: lib.settings });
     }
     if (seg[1] === 'avatar' && (M === 'GET' || M === 'HEAD')) return sendFile(req, res, avatarFile(user.id), 'image/jpeg');
     if (seg[1] === 'avatar' && M === 'PUT') {
@@ -435,6 +445,17 @@ async function api(req, res, url) {
     if (M === 'DELETE') { delete list[seg[2]]; save(); return json(res, 200, { ok: true }); }
   }
 
+  // 系列简介
+  if (seg[0] === 'series' && seg.length === 1 && M === 'PUT') {
+    const body = await readJson(req);
+    const name = str(body.name, 200);
+    if (!name) return fail(res, 400, '缺少系列名');
+    if (str(body.description, 8000)) lib.series[name] = { description: str(body.description, 8000), updatedAt: Date.now() };
+    else delete lib.series[name];
+    save();
+    return json(res, 200, { series: lib.series[name] || null });
+  }
+
   // 阅读时长：客户端上报增量，服务器按“日期 → 书”累加，多台设备不会互相覆盖
   if (seg[0] === 'stats' && seg.length === 1 && M === 'POST') {
     const body = await readJson(req);
@@ -443,6 +464,10 @@ async function api(req, res, url) {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(it.day) || !lib.books[it.book] || !(seconds > 0) || seconds > 86400) continue;
       const day = lib.stats[it.day] || (lib.stats[it.day] = {});
       day[it.book] = Math.min(86400, (day[it.book] || 0) + seconds);
+      if (Number.isInteger(it.hour) && it.hour >= 0 && it.hour < 24) { // 一天里几点在读，统计页的节律图用
+        const hrs = lib.hours[it.day] || (lib.hours[it.day] = {});
+        hrs[it.hour] = Math.min(3600, (hrs[it.hour] || 0) + seconds);
+      }
     }
     save();
     return json(res, 200, { ok: true });

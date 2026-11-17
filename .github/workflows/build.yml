@@ -66,6 +66,11 @@ jobs:
           target=$(find src-tauri/gen/android/app/src/main/java -name MainActivity.kt | head -n 1)
           test -n "$target"
           cp src-tauri/android/MainActivity.kt "$target"
+      - name: 允许翻页轻震
+        run: |
+          manifest=src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.VIBRATE' "$manifest" || sed -i 's#<application#<uses-permission android:name="android.permission.VIBRATE" />\n    <application#' "$manifest"
+          grep -n 'VIBRATE' "$manifest"
       - run: npx tauri icon src-tauri/app-icon.png
       - run: npx tauri android build --apk --target aarch64 --target armv7
       - name: 签名 APK
@@ -77,13 +82,11 @@ jobs:
           set -euo pipefail
           APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -n 1)
           TOOLS="$ANDROID_HOME/build-tools/34.0.0"
-          if [ -n "${KEYSTORE_B64:-}" ]; then
-            echo "$KEYSTORE_B64" | base64 -d > release.jks
-          else
-            KS_PASS=temporary-key; KS_ALIAS=bunko
-            keytool -genkeypair -keystore release.jks -storepass "$KS_PASS" -keypass "$KS_PASS" \
-              -alias "$KS_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Susuko Bunko"
-          fi
+          : "${KEYSTORE_B64:?Missing ANDROID_KEYSTORE_BASE64}"
+          : "${KS_PASS:?Missing ANDROID_KEYSTORE_PASSWORD}"
+          : "${KS_ALIAS:?Missing ANDROID_KEY_ALIAS}"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > release.jks
+          chmod 600 release.jks
           "$TOOLS/zipalign" -f -p 4 "$APK" aligned.apk
           "$TOOLS/apksigner" sign --ks release.jks --ks-pass "pass:$KS_PASS" --ks-key-alias "$KS_ALIAS" \
             --out SusukoBunko.apk aligned.apk

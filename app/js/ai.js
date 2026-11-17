@@ -179,3 +179,20 @@ export function stopSpeaking() {
   for (const [id, w] of nativeWaiters) { nativeWaiters.delete(id); w(false); }
   if (audio) { const a = audio; audio = null; a.pause(); }
 }
+
+/** 让助手写简介。kind：'book' 单本 | 'series' 整个系列。模型不能上网，只能凭它知道的写，不认识就说不认识 */
+export function describeMessages({ kind, title, author, illustrator, publisher, volumes, volume, existing }) {
+  const target = aiSettings().target;
+  const facts = [author && `作者：${author}`, illustrator && `插画：${illustrator}`, publisher && `出版社：${publisher}`,
+    kind === 'series' && volumes && `已有 ${volumes} 卷`, kind === 'book' && volume != null && `第 ${volume} 卷`].filter(Boolean).join('；');
+  return [{
+    role: 'user',
+    content: `请为${kind === 'series' ? '轻小说系列' : '这本轻小说'}《${title}》写一段${target}简介。${facts ? `\n已知信息：${facts}` : ''}${existing ? `\n书里自带的介绍（可能是日文或不完整）：${existing.slice(0, 1500)}` : ''}
+
+要求：
+- 150～260 字，像书封底的文案那样介绍故事设定、主要人物和看点
+- ${kind === 'series' ? '介绍整个系列的大致设定，不要剧透后面几卷的关键情节' : '只介绍这一卷开头的设定，不要剧透结局'}
+- 你不能上网。如果你不了解这部作品，只根据已知信息写，并在最后一行注明“（根据书名推测，仅供参考）”；不要编造具体情节
+- 只输出简介正文，不要标题和多余的话`,
+  }];
+}

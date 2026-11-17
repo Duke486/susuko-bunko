@@ -4,11 +4,17 @@ import { Epub } from './epub.js';
 
 // ---------- 本机设置 ----------
 const LS = 'shiori.';
+// 跟着账号走的设置：登录后在每台设备上都一样（设备名、缓存之类的本机设置不在其中）
+export const SYNCED_PREFS = ['ai', 'tts', 'reader', 'comic', 'accent', 'theme', 'layout', 'stack', 'pill', 'sort'];
+let onSyncedPrefChange = null;
 export const prefs = {
   get(key, fallback) {
     try { const v = localStorage.getItem(LS + key); return v == null ? fallback : JSON.parse(v); } catch { return fallback; }
   },
-  set(key, value) { try { localStorage.setItem(LS + key, JSON.stringify(value)); } catch { /* 存不下就算了 */ } },
+  set(key, value, { quiet = false } = {}) {
+    try { localStorage.setItem(LS + key, JSON.stringify(value)); } catch { /* 存不下就算了 */ }
+    if (!quiet && SYNCED_PREFS.includes(key)) onSyncedPrefChange?.();
+  },
   remove(key) { try { localStorage.removeItem(LS + key); } catch { /* 忽略 */ } },
 };
 
@@ -60,6 +66,8 @@ export const state = {
   books: {}, collections: {}, progress: {},
   marks: {}, // 书签、页笔记、划线批注：bookId -> { markId: mark }
   stats: {}, // 阅读时长：'YYYY-MM-DD' -> { bookId: 秒 }
+  hours: {}, // 一天里几点在读：'YYYY-MM-DD' -> { 小时: 秒 }
+  series: {}, // 系列简介：系列名 -> { description }
   downloaded: new Set(), // 已缓存到本机的书
   online: false, syncing: false, lastSync: 0,
 };
@@ -92,6 +100,7 @@ export function profile() {
 
 const persist = () => local.put('kv', libKey(), {
   books: state.books, collections: state.collections, progress: state.progress, marks: state.marks, stats: state.stats,
+  hours: state.hours, series: state.series,
 }).catch(() => {});
 const persistPending = () => (account() ? local.put('kv', queueKey(), { progress: pending, marks: pendingMarks, stats: pendingStats }).catch(() => {}) : Promise.resolve());
 const persistQueues = persistPending;
@@ -167,7 +176,7 @@ async function switchLibrary(change) {
   for (const u of coverUrls.values()) Promise.resolve(u).then((x) => x && URL.revokeObjectURL(x)).catch(() => {});
   coverUrls.clear();
   remotes.clear();
-  Object.assign(state, { books: {}, collections: {}, progress: {}, marks: {}, stats: {}, online: false, authLost: false });
+  Object.assign(state, { books: {}, collections: {}, progress: {}, marks: {}, stats: {}, hours: {}, series: {}, online: false, authLost: false });
   pending = {}; pendingMarks = []; pendingStats = [];
   await init();
 }
@@ -177,7 +186,7 @@ export function useLocally() { prefs.set('localMode', true); emit(); }
 export async function init() {
   try {
     const [cached, queues, keys] = await Promise.all([local.get('kv', libKey()), local.get('kv', queueKey()), local.keys('files')]);
-    if (cached) Object.assign(state, { books: {}, collections: {}, progress: {}, marks: {}, stats: {}, ...cached });
+    if (cached) Object.assign(state, { books: {}, collections: {}, progress: {}, marks: {}, stats: {}, hours: {}, series: {}, ...cached });
     if (account()) {
       pending = queues?.progress || {}; pendingMarks = queues?.marks || []; pendingStats = queues?.stats || [];
       for (const [id, p] of Object.entries(pending)) state.progress[id] = p;
@@ -264,8 +273,10 @@ async function doSync() {
     const before = Object.keys(state.books);
     state.books = remote.books; state.collections = remote.collections;
     state.marks = remote.marks || {}; state.stats = remote.stats || {};
+    state.hours = remote.hours || {}; state.series = remote.series || {};
     for (const op of pendingMarks) applyMark(op); // 还没推上去的本地改动继续保留
     for (const it of pendingStats) bumpStat(it);
+    await syncSettings(remote.settings);
     const progress = remote.progress;
     for (const [id, p] of Object.entries(pending)) { // 本地更新的进度不被旧数据覆盖
       if (!progress[id] || p.updatedAt > progress[id].updatedAt) progress[id] = p;
@@ -305,9 +316,59 @@ function applyMark(op) {
   const list = state.marks[op.bookId] || (state.marks[op.bookId] = {});
   if (op.op === 'del') delete list[op.id]; else list[op.id] = op.mark;
 }
-function bumpStat({ day, book, seconds }) {
+function bumpStat({ day, book, seconds, hour }) {
   const d = state.stats[day] || (state.stats[day] = {});
   d[book] = (d[book] || 0) + seconds;
+  if (hour != null) { const hrs = state.hours[day] || (state.hours[day] = {}); hrs[hour] = (hrs[hour] || 0) + seconds; }
+}
+
+// ---------- 账号设置同步 ----------
+// 本机改了要同步的设置就记一个时间，同步时和服务器上的比，较新的一方覆盖较旧的一方
+const settingsStamp = () => prefs.get('settingsAt:' + (account()?.user.id || 'local'), 0);
+function collectSettings() {
+  const data = {};
+  for (const k of SYNCED_PREFS) { const v = prefs.get(k, undefined); if (v !== undefined) data[k] = v; }
+  return data;
+}
+let settingsTimer = null;
+onSyncedPrefChange = () => {
+  if (!account()) return;
+  prefs.set('settingsAt:' + account().user.id, Date.now());
+  clearTimeout(settingsTimer);
+  settingsTimer = setTimeout(() => pushSettings().catch(() => {}), 1500);
+};
+async function pushSettings(initial = false) {
+  if (!account()) return;
+  const data = collectSettings();
+  if (initial) data.__initial = true;
+  await apiJson('/api/me/settings', 'PUT', { data, updatedAt: initial ? 1 : settingsStamp() || Date.now() });
+}
+async function syncSettings(remote) {
+  if (!account()) return;
+  const mine = settingsStamp();
+  if (remote && remote.data.__initial && !mine) {
+    // 两台设备都是第一次同步：合并（这台设备上有的设置优先），免得把另一台还没设置过的空白值盖过来
+    const local = collectSettings();
+    for (const k of SYNCED_PREFS) if (!(k in local) && k in remote.data) prefs.set(k, remote.data[k], { quiet: true });
+    prefs.set('settingsAt:' + account().user.id, Date.now());
+    window.dispatchEvent(new CustomEvent('settings-synced'));
+    await pushSettings().catch(() => {});
+  } else if (remote && remote.updatedAt > mine) {
+    for (const k of SYNCED_PREFS) {
+      if (k in remote.data) prefs.set(k, remote.data[k], { quiet: true }); else prefs.remove(k);
+    }
+    prefs.set('settingsAt:' + account().user.id, remote.updatedAt);
+    window.dispatchEvent(new CustomEvent('settings-synced'));
+  } else if (mine && (!remote || mine > remote.updatedAt)) await pushSettings().catch(() => {});
+  else if (!remote) await pushSettings(true).catch(() => {}); // 新账号：把这台设备的设置作为初始值
+}
+
+// ---------- 系列简介 ----------
+export async function setSeriesDescription(name, description) {
+  description = description.trim().slice(0, 8000);
+  if (account()) await apiJson('/api/series', 'PUT', { name, description });
+  if (description) state.series[name] = { description, updatedAt: Date.now() }; else delete state.series[name];
+  persist(); emit();
 }
 async function flushQueues() {
   if (!account()) return;
@@ -359,7 +420,7 @@ export function dayKey(d = new Date()) {
 }
 function commitReading() {
   if (!reading || reading.acc < 1) return;
-  const it = { day: dayKey(), book: reading.bookId, seconds: Math.round(reading.acc) };
+  const it = { day: dayKey(), book: reading.bookId, seconds: Math.round(reading.acc), hour: new Date().getHours() };
   reading.acc = 0;
   bumpStat(it);
   if (account()) { pendingStats.push(it); persistQueues(); }

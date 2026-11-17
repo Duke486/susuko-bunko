@@ -214,7 +214,8 @@ function renderShelf() {
   els.selectBtn = h('button.icon-btn', { type: 'button', onclick: () => (view.selecting ? exitSelect() : enterSelect()) }, icon('checkCircle'));
   els.syncBtn = h('button.icon-btn', { type: 'button', onclick: manualSync });
   els.importBtn = h('button.btn.is-primary', { type: 'button', onclick: () => fileInput.click() }, icon('plus', 18), '导入');
-  els.main = h('main.main', h('header.topbar', els.heading, els.tools), els.body, fileInput);
+  els.intro = h('section.series-intro', { hidden: true });
+  els.main = h('main.main', h('header.topbar', els.heading, els.tools), els.intro, els.body, fileInput);
 
   app.replaceChildren(h('div.shell',
     h('aside.side',
@@ -229,7 +230,7 @@ function renderAll() {
   if (isSeries(view.filter)) { if (!booksIn(view.filter).length) view.filter = view.back || 'all'; }
   else if (!['all', 'reading', 'finished', 'none', ...PAGES].includes(view.filter) && !state.collections[view.filter]) view.filter = 'all';
   if (view.detail && !state.books[view.detail]) view.detail = null;
-  renderNav(); renderMe(); renderHeading(); renderTools(); renderBody(); renderBar(); renderPill(); renderDetail();
+  renderNav(); renderMe(); renderHeading(); renderTools(); renderIntro(); renderBody(); renderBar(); renderPill(); renderDetail();
 }
 
 const NAV_COLORS = { all: '#3B82F6', reading: '#F59E0B', finished: '#10B981', none: '#8B5CF6', collection: '#EAB308', excerpts: '#14B8A6', stats: '#EC4899', settings: '#64748B' };
@@ -253,6 +254,7 @@ function renderNav() {
     item('stats', 'chart', '阅读统计', NAV_COLORS.stats),
     item('settings', 'gear', '设置', NAV_COLORS.settings),
   );
+  requestAnimationFrame(() => els.nav.querySelector('.is-active')?.scrollIntoView({ inline: 'nearest', block: 'nearest' }));
 }
 
 function renderMe() {
@@ -296,9 +298,79 @@ function renderTools() {
   renderSync();
 }
 
+// ---------- 系列介绍 ----------
+function renderIntro() {
+  const f = view.filter;
+  els.intro.hidden = !isSeries(f);
+  if (!isSeries(f)) return;
+  const name = f.slice(7);
+  const books = booksIn(f).sort(byVolume);
+  if (!books.length) return;
+  const first = books[0];
+  const cur = books.find((b) => store.statusOf(b) !== 'finished') || books[books.length - 1];
+  const done = books.filter((b) => store.statusOf(b) === 'finished').length;
+  const own = state.series[name]?.description;
+  const text = own || first.description || '';
+  const desc = h('p.si-desc', text || '还没有系列简介。可以自己写，也可以让阅读助手写一段。');
+  const more = text.length > 120 && h('button.link-btn', { type: 'button', onclick: () => { desc.classList.toggle('is-open'); more.textContent = desc.classList.contains('is-open') ? '收起' : '展开全部'; } }, '展开全部');
+  const people = [first.author, first.illustrator && `插画 ${first.illustrator}`, first.publisher].filter(Boolean).join(' · ');
+  const sec = books.reduce((n, b) => n + store.secondsOf(b.id), 0);
+  els.intro.replaceChildren(
+    h('div.si-cover', coverOf(first)),
+    h('div.si-main',
+      h('p.si-kicker', '系列'),
+      h('h2', name),
+      people && h('p.si-people', people),
+      h('div.si-stats',
+        h('span', h('b', String(books.length)), ' 卷'),
+        h('span', h('b', String(done)), ' 卷读完'),
+        sec > 0 && h('span', '共读了 ', h('b', fmtDuration(sec)))),
+      h('div.si-text', !own && first.description && h('span.si-source', '第 1 卷自带的介绍'), desc, more),
+      h('div.si-actions',
+        h('button.btn.is-primary', { type: 'button', onclick: () => openBook(cur.id) }, icon('dict', 18),
+          store.statusOf(cur) === 'unread' && !done ? '从第 1 卷开始' : `继续读${cur.volume != null ? `第 ${cur.volume} 卷` : ''}`),
+        h('button.btn', { type: 'button', onclick: () => editSeriesDescription(name, own || '') }, icon('pen', 18), own ? '修改简介' : '写简介'),
+        h('button.btn', { type: 'button', onclick: () => aiDescribeSeries(name, books) }, icon('sparkle', 18), '让助手写简介'))));
+}
+function editSeriesDescription(name, value) {
+  return dialog(`「${name}」的系列简介`, (close) => {
+    const area = h('textarea.field.is-area', { value, rows: 8, maxLength: 8000, placeholder: '这个系列讲了什么？' });
+    const status = h('p.field-hint', { role: 'status' });
+    const books = booksIn('series:' + name).sort(byVolume);
+    return h('form.dialog-body', { onsubmit: async (e) => { e.preventDefault(); if (await guard(() => store.setSeriesDescription(name, area.value), '系列简介已保存')) close(); } },
+      area, status,
+      h('div.dialog-actions',
+        h('button.btn.is-quiet', { type: 'button', onclick: () => fillWithAi(area, status, seriesFacts(name, books)) }, icon('sparkle', 18), '让助手写'),
+        h('button.btn', { type: 'button', onclick: () => close() }, '取消'),
+        h('button.btn.is-primary', { type: 'submit' }, '保存')));
+  });
+}
+const seriesFacts = (name, books) => ({ kind: 'series', title: name, author: books[0]?.author, illustrator: books[0]?.illustrator, publisher: books[0]?.publisher, volumes: books.length, existing: books[0]?.description });
+function aiDescribeSeries(name, books) {
+  editSeriesDescription(name, state.series[name]?.description || '').then(() => {});
+  setTimeout(() => document.querySelector('dialog[open] .btn.is-quiet')?.click(), 60);
+}
+/** 让阅读助手把简介写进文本框（边写边显示），写完由用户确认保存 */
+async function fillWithAi(area, status, facts) {
+  if (!ai.aiReady() || (!ai.aiSettings().key && /openai\.com/.test(ai.aiSettings().base))) {
+    status.textContent = '还没有设置阅读助手的接口，请先到 设置 → 阅读助手 里填写。';
+    return;
+  }
+  const before = area.value;
+  status.textContent = '阅读助手正在写…';
+  area.classList.add('is-writing');
+  try {
+    const text = await ai.chat(ai.describeMessages(facts), { onDelta: (t) => { area.value = t; area.scrollTop = area.scrollHeight; } });
+    area.value = text.trim() || before;
+    status.textContent = '写好了。助手不能上网，内容不一定准确，请看一遍再保存。';
+  } catch (e) { area.value = before; status.textContent = `没写成：${e.message}`; }
+  finally { area.classList.remove('is-writing'); }
+}
+
 function renderBody() {
   const f = view.filter;
   const shelfNow = !isPage(f) && view.layout === 'shelf' && !view.selecting && visibleBooks().length > 0;
+  els.main.classList.toggle('is-shelf', shelfNow);
   if (els.shelf && !shelfNow) { els.shelf.api.destroy(); els.shelf = null; }
   els.body.className = 'body';
   if (f === 'stats') return renderStats();
@@ -576,7 +648,7 @@ function renderDetail() {
   const sec = store.secondsOf(b.id);
   const marks = store.marksOf(b.id);
   const hl = marks.filter((m) => m.type === 'highlight').length;
-  const desc = h('p.detail-desc', b.description || '还没有简介。可以点“编辑信息”自己写一段。');
+  const desc = h('p.detail-desc', b.description || '还没有简介。可以点“编辑信息”自己写，或者让阅读助手写一段。');
   const more = b.description && b.description.length > 160 && h('button.link-btn', { type: 'button', onclick: () => { desc.classList.toggle('is-open'); more.textContent = desc.classList.contains('is-open') ? '收起' : '展开全部'; } }, '展开全部');
   const facts = [
     b.illustrator && ['插画', b.illustrator], b.publisher && ['出版社', b.publisher],
@@ -601,7 +673,11 @@ function renderDetail() {
       h('div.detail-actions',
         h('button.btn.is-primary.is-grow', { type: 'button', onclick: () => openBook(b.id) }, icon('dict', 18), p > 0 ? '继续阅读' : '开始阅读'),
         h('button.btn', { type: 'button', onclick: () => editBook(b.id) }, '编辑信息')),
-      h('section.detail-sec', h('h3', '简介'), desc, more),
+      h('section.detail-sec', h('h3', '简介'), desc, more,
+        !b.description && h('button.btn.is-soft-sm', { type: 'button', onclick: () => {
+          editBook(b.id);
+          setTimeout(() => document.querySelector('dialog[open] .label-row .link-btn')?.click(), 60);
+        } }, icon('sparkle', 16), '让助手写简介')),
       b.review && h('section.detail-sec', h('h3', '我的书评'), h('p.detail-review', b.review)),
       marks.length > 0 && h('section.detail-sec',
         h('button.detail-link', { type: 'button', onclick: () => { view.excerptBook = b.id; setFilter('excerpts'); } },
@@ -795,6 +871,7 @@ function editBook(id) {
     const illustrator = h('input.field', { type: 'text', value: book.illustrator || '', maxLength: 200 });
     const publisher = h('input.field', { type: 'text', value: book.publisher || '', maxLength: 200, placeholder: '例如：电击文库' });
     const description = h('textarea.field.is-area', { value: book.description || '', maxLength: 8000, rows: 5, placeholder: '这本书讲了什么？' });
+    const descStatus = h('p.field-hint', { role: 'status' });
     const review = h('textarea.field.is-area', { value: book.review || '', maxLength: 5000, rows: 4, placeholder: '读完有什么想说的？' });
     let rating = book.rating || 0;
     const stars = h('div.stars', { role: 'group', 'aria-label': '评分' });
@@ -827,7 +904,9 @@ function editBook(id) {
       h('div', h('label.field-label', '作者'), author),
       h('div', h('label.field-label', '插画'), illustrator)),
     h('label.field-label', '出版社'), publisher,
-    h('label.field-label', '简介'), description,
+    h('div.label-row', h('label.field-label', '简介'),
+      h('button.link-btn', { type: 'button', onclick: () => fillWithAi(description, descStatus, { kind: 'book', title: book.title, author: author.value, illustrator: illustrator.value, publisher: publisher.value, volume: book.volume, existing: book.description }) }, icon('sparkle', 16), '让助手写')),
+    description, descStatus,
     h('label.field-label', '阅读状态'), statusSeg,
     h('div.field-pair',
       h('div', h('label.field-label', '系列'), series),
@@ -938,63 +1017,182 @@ export function editAnnotation(bookId, mark) {
 }
 
 // ---------- 阅读统计 ----------
+// 悬停提示：图表上的柱子、格子都带 data-tip，鼠标或手指放上去显示具体数值
+let tipEl = null;
+function chartTips(root) {
+  const show = (e) => {
+    const t = e.target.closest?.('[data-tip]');
+    if (!t) { tipEl?.remove(); tipEl = null; return; }
+    tipEl ??= document.body.appendChild(h('div.chart-tip', { role: 'tooltip' }));
+    tipEl.textContent = t.dataset.tip;
+    const r = t.getBoundingClientRect();
+    const w = tipEl.offsetWidth;
+    tipEl.style.left = `${Math.min(innerWidth - w - 8, Math.max(8, r.left + r.width / 2 - w / 2))}px`;
+    tipEl.style.top = `${Math.max(8, r.top - tipEl.offsetHeight - 8)}px`;
+  };
+  root.addEventListener('pointerover', show);
+  root.addEventListener('pointerleave', () => { tipEl?.remove(); tipEl = null; });
+  return root;
+}
+const dur = (sec) => fmtDuration(sec);
+function dayList(n, end = new Date()) {
+  const today = new Date(end); today.setHours(0, 0, 0, 0);
+  return Array.from({ length: n }, (_, i) => { const d = new Date(today); d.setDate(d.getDate() - (n - 1 - i)); return d; });
+}
+const daySum = (key) => Object.values(state.stats[key] || {}).reduce((a, b) => a + b, 0);
+function streaks() { // 当前连续天数（今天还没读就从昨天算起）和历史最长
+  const days = new Set(Object.keys(state.stats).filter((k) => daySum(k) > 0));
+  let longest = 0;
+  for (const k of days) {
+    const d = new Date(k + 'T00:00:00'); d.setDate(d.getDate() - 1);
+    if (days.has(store.dayKey(d))) continue; // 只从每段连续的第一天往后数
+    let n = 0; const c = new Date(k + 'T00:00:00');
+    while (days.has(store.dayKey(c))) { n++; c.setDate(c.getDate() + 1); }
+    longest = Math.max(longest, n);
+  }
+  const c = new Date(); c.setHours(0, 0, 0, 0);
+  if (!days.has(store.dayKey(c))) c.setDate(c.getDate() - 1);
+  let current = 0;
+  while (days.has(store.dayKey(c))) { current++; c.setDate(c.getDate() - 1); }
+  return { current, longest };
+}
+
 function renderStats() {
   const range = view.statRange || 30;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const days = Array.from({ length: range }, (_, i) => { const d = new Date(today); d.setDate(d.getDate() - (range - 1 - i)); return d; });
-  const perDay = days.map((d) => Object.values(state.stats[store.dayKey(d)] || {}).reduce((a, b) => a + b, 0));
+  const days = dayList(range);
+  const keys = days.map((d) => store.dayKey(d));
+  const perDay = keys.map(daySum);
   const total = perDay.reduce((a, b) => a + b, 0);
+  const prevTotal = dayList(range, new Date(days[0].getTime() - 86400000)).reduce((n, d) => n + daySum(store.dayKey(d)), 0);
+  const active = perDay.filter(Boolean).length;
+  const best = perDay.reduce((m, v, i) => (v > m.v ? { v, i } : m), { v: 0, i: -1 });
   const perBook = new Map();
-  for (const d of days) for (const [id, sec] of Object.entries(state.stats[store.dayKey(d)] || {})) perBook.set(id, (perBook.get(id) || 0) + sec);
+  for (const k of keys) for (const [id, sec] of Object.entries(state.stats[k] || {})) perBook.set(id, (perBook.get(id) || 0) + sec);
   const ranked = [...perBook].filter(([id]) => state.books[id]).sort((a, b) => b[1] - a[1]);
-  const marks = Object.values(state.marks).reduce((n, list) => n + Object.keys(list).length, 0);
+  const since = days[0].getTime();
+  const finished = Object.values(state.books).filter((b) => store.statusOf(b) === 'finished' && (state.progress[b.id]?.updatedAt || 0) >= since).length;
+  const allMarks = Object.entries(state.marks).flatMap(([id, l]) => Object.values(l).map((m) => ({ ...m, bookId: id })));
+  const marksIn = allMarks.filter((m) => m.createdAt >= since);
+  const st = streaks();
 
-  // 柱状图：7 / 30 天按天，90 天按周，365 天按月
-  let buckets;
-  if (range <= 30) buckets = days.map((d, i) => ({ label: `${d.getMonth() + 1}/${d.getDate()}`, short: range === 7 ? '日一二三四五六'[d.getDay()] : (d.getDate() === 1 || i === 0 || i % 5 === 0 ? `${d.getDate()}` : ''), sec: perDay[i] }));
-  else if (range === 90) {
-    buckets = [];
-    for (let i = 0; i < days.length; i += 7) buckets.push({ label: `${days[i].getMonth() + 1}/${days[i].getDate()} 起的一周`, short: buckets.length % 2 ? '' : `${days[i].getMonth() + 1}/${days[i].getDate()}`, sec: perDay.slice(i, i + 7).reduce((a, b) => a + b, 0) });
-  } else {
-    const by = new Map();
-    days.forEach((d, i) => { const k = `${d.getFullYear()}-${d.getMonth()}`; const b = by.get(k) || { label: `${d.getFullYear()} 年 ${d.getMonth() + 1} 月`, short: `${d.getMonth() + 1}月`, sec: 0 }; b.sec += perDay[i]; by.set(k, b); });
-    buckets = [...by.values()];
-  }
-  const peak = Math.max(1, ...buckets.map((b) => b.sec));
-  const week = [1, 2, 3, 4, 5, 6, 0].map((w) => ({ label: '周' + '日一二三四五六'[w], short: '日一二三四五六'[w], sec: days.reduce((n, d, i) => n + (d.getDay() === w ? perDay[i] : 0), 0) }));
-  const weekPeak = Math.max(1, ...week.map((b) => b.sec));
-  const bars = (list, top, cls = '') => h('div.bars' + cls, { role: 'img', 'aria-label': list.filter((b) => b.sec).map((b) => `${b.label} ${fmtDuration(b.sec)}`).join('，') || '这段时间没有阅读记录' },
-    list.map((b) => h('div.bar-col', { title: `${b.label}：${fmtDuration(b.sec)}` },
-      h('div.bar-track', h('div.bar' + (b.sec === top && b.sec > 0 ? '.is-peak' : ''), { style: `height:${b.sec ? Math.max(3, (b.sec / top) * 100) : 0}%` })),
-      h('span.bar-label', b.short))));
-  const hours = Math.floor(total / 3600), minutes = Math.round((total % 3600) / 60);
+  // —— 总时长 + 和上一段比较
+  const H = Math.floor(total / 3600), M = Math.round((total % 3600) / 60);
+  const delta = total - prevTotal;
+  const deltaText = !prevTotal && !total ? '这段时间还没有阅读记录' : !prevTotal ? `上一个 ${range} 天没有记录` :
+    `比上一个 ${range} 天${delta >= 0 ? '多' : '少'} ${dur(Math.abs(delta))}（${delta >= 0 ? '+' : '−'}${Math.round(Math.abs(delta) / prevTotal * 100)}%）`;
   const seg = h('div.segmented', { role: 'group', 'aria-label': '统计范围' }, [7, 30, 90, 365].map((n) => h('button' + (n === range ? '.is-on' : ''), {
     type: 'button', onclick: () => { view.statRange = n; renderBody(); },
   }, `${n} 天`)));
-  const fact = (value, unit, label) => h('div.fact', h('div.fact-value', String(value), h('small', unit)), h('div.fact-label', label));
+  const tile = (value, unit, label, sub) => h('div.fact', h('div.fact-value', String(value), h('small', unit)), h('div.fact-label', label), sub && h('div.fact-sub', sub));
+
+  // —— 每天 / 每周 / 每月的柱状图，带平均线
+  let buckets;
+  if (range <= 30) buckets = days.map((d, i) => ({ tip: `${d.getMonth() + 1} 月 ${d.getDate()} 日：${dur(perDay[i])}`, label: range === 7 ? '日一二三四五六'[d.getDay()] : (i % 5 === 0 || i === range - 1 ? `${d.getMonth() + 1}/${d.getDate()}` : ''), sec: perDay[i] }));
+  else if (range === 90) {
+    buckets = [];
+    for (let i = 0; i < days.length; i += 7) { const d = days[i]; buckets.push({ tip: `${d.getMonth() + 1}/${d.getDate()} 起一周：${dur(perDay.slice(i, i + 7).reduce((a, b) => a + b, 0))}`, label: buckets.length % 3 ? '' : `${d.getMonth() + 1}/${d.getDate()}`, sec: perDay.slice(i, i + 7).reduce((a, b) => a + b, 0) }); }
+  } else {
+    const by = new Map();
+    days.forEach((d, i) => { const k = `${d.getFullYear()}-${d.getMonth()}`; const b = by.get(k) || { tip: '', name: `${d.getFullYear()} 年 ${d.getMonth() + 1} 月`, label: `${d.getMonth() + 1}月`, sec: 0 }; b.sec += perDay[i]; by.set(k, b); });
+    buckets = [...by.values()].map((b) => ({ ...b, tip: `${b.name}：${dur(b.sec)}` }));
+  }
+  const peak = Math.max(1, ...buckets.map((b) => b.sec));
+  const avg = buckets.length ? buckets.reduce((n, b) => n + b.sec, 0) / buckets.length : 0;
+  const barChart = h('div.bars-wrap',
+    h('div.bars' + (buckets.length > 14 ? '.is-dense' : ''), buckets.map((b) => h('div.bar-col', { 'data-tip': b.tip },
+      h('div.bar-track', h('div.bar' + (b.sec === peak && b.sec > 0 ? '.is-peak' : ''), { style: `height:${b.sec ? Math.max(2, (b.sec / peak) * 100) : 0}%` })),
+      h('span.bar-label', b.label)))),
+    avg > 0 && h('div.avg-line', { style: `bottom:calc(22px + (100% - 22px) * ${avg / peak})`, 'data-tip': `平均每${range <= 30 ? '天' : range === 90 ? '周' : '月'} ${dur(avg)}` }, h('span', `平均 ${dur(avg)}`)));
+
+  // —— 日历热力图：一格一天，颜色越深读得越久
+  const weeks = range <= 30 ? 6 : range === 90 ? 13 : 53;
+  const calDays = dayList(weeks * 7 - (6 - ((new Date().getDay() + 6) % 7)));
+  const calMax = Math.max(1, ...calDays.map((d) => daySum(store.dayKey(d))));
+  const level = (sec) => (!sec ? 0 : sec < calMax * 0.25 ? 1 : sec < calMax * 0.5 ? 2 : sec < calMax * 0.8 ? 3 : 4);
+  const cells = [];
+  const firstCol = (calDays[0].getDay() + 6) % 7; // 周一在第一行
+  for (let i = 0; i < firstCol; i++) cells.push(h('span.cal-cell.is-pad'));
+  const monthMarks = [];
+  calDays.forEach((d, i) => {
+    const sec = daySum(store.dayKey(d));
+    if (d.getDate() === 1 || i === 0) monthMarks.push([Math.floor((i + firstCol) / 7), `${d.getMonth() + 1}月`]);
+    cells.push(h('span.cal-cell.is-l' + level(sec), { 'data-tip': `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}：${sec ? dur(sec) : '没有阅读'}` }));
+  });
+  const cols = Math.ceil(cells.length / 7);
+  const cell = cols <= 8 ? 30 : cols <= 14 ? 24 : 14; // 格子少就画大一点
+  const calendar = h('div.cal', { style: `--cols:${cols};--cell:${cell}px;--gap:${cell > 20 ? 6 : 4}px` },
+    h('div.cal-months', monthMarks.map(([c, t]) => h('span', { style: `grid-column:${c + 1}` }, t))),
+    h('div.cal-days', ['一', '', '三', '', '五', '', '日'].map((t) => h('span', t))),
+    h('div.cal-grid', cells),
+    h('div.cal-legend', h('span', '少'), [0, 1, 2, 3, 4].map((l) => h('span.cal-cell.is-l' + l)), h('span', '多')));
+
+  // —— 一天里的节律：24 根放射状的柱子
+  const hours = Array(24).fill(0);
+  for (const k of keys) for (const [hr, sec] of Object.entries(state.hours[k] || {})) hours[hr] += sec;
+  const hourTotal = hours.reduce((a, b) => a + b, 0);
+  const topHour = hours.indexOf(Math.max(...hours));
+  const night = [22, 23, 0, 1, 2, 3, 4, 5].reduce((n, hr) => n + hours[hr], 0);
+  const hMax = Math.max(1, ...hours);
+  const R0 = 58, R1 = 112;
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '-130 -130 260 260'); svg.setAttribute('class', 'clock');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', hourTotal ? `最常在 ${topHour} 点读书` : '还没有分时段的记录');
+  const add = (tag, attrs, text) => { const el = document.createElementNS(ns, tag); for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v); if (text) el.textContent = text; svg.append(el); return el; };
+  add('circle', { r: R0 - 6, class: 'clock-face' });
+  for (let hr = 0; hr < 24; hr++) {
+    const ang = (hr / 24) * Math.PI * 2 - Math.PI / 2;
+    const len = hours[hr] ? Math.max(4, (hours[hr] / hMax) * (R1 - R0)) : 2;
+    const [c, s2] = [Math.cos(ang), Math.sin(ang)];
+    const ln = add('line', { x1: c * R0, y1: s2 * R0, x2: c * (R0 + len), y2: s2 * (R0 + len), class: 'clock-bar' + (hr === topHour && hours[hr] ? ' is-top' : '') + (hr >= 22 || hr < 6 ? ' is-night' : '') });
+    ln.dataset.tip = `${hr}:00–${hr + 1}:00：${hours[hr] ? dur(hours[hr]) : '没有阅读'}`;
+    if (hr % 6 === 0) add('text', { x: c * (R1 + 12), y: s2 * (R1 + 12) + 4, class: 'clock-num' }, String(hr));
+  }
+  add('text', { x: 0, y: -4, class: 'clock-big' }, hourTotal ? `${topHour}:00` : '—');
+  add('text', { x: 0, y: 16, class: 'clock-small' }, hourTotal ? '最常读书的时段' : '暂无记录');
+  const week = [1, 2, 3, 4, 5, 6, 0].map((w) => ({ w, sec: days.reduce((n, d, i) => n + (d.getDay() === w ? perDay[i] : 0), 0) }));
+  const wMax = Math.max(1, ...week.map((x) => x.sec));
+
+  // —— 每本书
+  const bookRows = ranked.slice(0, 20).map(([id, sec]) => {
+    const b = state.books[id], p = state.progress[id]?.percent || 0;
+    return h('button.stat-book', { type: 'button', onclick: () => openBook(id), 'data-tip': `${store.seriesLabel(b)}：${dur(sec)}` },
+      h('span.sb-cover', coverOf(b)),
+      h('span.sb-main', h('span.stat-book-title', store.seriesLabel(b)),
+        h('span.stat-book-bar', h('span', { style: `width:${Math.max(2, (sec / ranked[0][1]) * 100)}%` }))),
+      h('span.sb-end', h('b', dur(sec)), h('small', store.statusOf(b) === 'finished' ? '已读完' : `读到 ${fmtPercent(Math.min(p, 0.99))}`)));
+  });
+  const recent = marksIn.filter((m) => m.type === 'highlight').sort((a, b) => b.createdAt - a.createdAt).slice(0, 3);
 
   els.body.className = 'body stats';
-  els.body.replaceChildren(
+  els.body.replaceChildren(chartTips(h('div.stats-inner',
     h('section.stat-hero',
       h('div',
         h('div.stat-caption', `近 ${range} 天的阅读时长`),
-        h('div.stat-big', hours > 0 && [String(hours), h('small', '小时')], String(minutes), h('small', '分'))),
+        h('div.stat-big', H > 0 && [String(H), h('small', '小时')], String(M), h('small', '分')),
+        h('div.stat-delta' + (delta > 0 ? '.is-up' : delta < 0 ? '.is-down' : ''), deltaText)),
       seg),
     h('section.stat-facts',
-      fact(perDay.filter(Boolean).length, '天', '有阅读的天数'),
-      fact(ranked.length, '本', '读过的书'),
-      fact(marks, '条', '书签与标记')),
-    h('section.stat-card', h('h2', range <= 30 ? '每天读了多久' : range === 90 ? '每周读了多久' : '每月读了多久'), bars(buckets, peak, buckets.length > 14 ? '.is-dense' : '')),
-    h('section.stat-card', h('h2', '一周里哪天读得多'), bars(week, weekPeak)),
-    h('section.stat-card', h('h2', '每本书读了多久'),
-      ranked.length ? h('div.stat-books', ranked.slice(0, 30).map(([id, sec]) => h('button.stat-book', {
-        type: 'button', title: '打开这本书', onclick: () => openBook(id),
-      },
-      h('span.stat-book-title', store.seriesLabel(state.books[id])),
-      h('span.stat-book-time', fmtDuration(sec)),
-      h('span.stat-book-bar', h('span', { style: `width:${Math.max(2, (sec / ranked[0][1]) * 100)}%` })))))
-        : h('p.stat-empty', '这段时间还没有阅读记录。打开一本书读一会儿，这里就会有数据。')),
-  );
+      tile(active, `/ ${range} 天`, '有阅读的天数'),
+      tile(st.current, '天', '当前连续阅读', `最长连续 ${st.longest} 天`),
+      tile(active ? Math.round(total / active / 60) : 0, '分钟', '读书那天平均读', best.v ? `最多的一天 ${days[best.i].getMonth() + 1}/${days[best.i].getDate()} 读了 ${dur(best.v)}` : ''),
+      tile(ranked.length, '本', '读过的书', finished ? `其中读完 ${finished} 本` : ''),
+      tile(marksIn.filter((m) => m.type === 'highlight').length, '条', '划线', `批注 ${marksIn.filter((m) => m.text).length} 条 · 书签 ${marksIn.filter((m) => m.type === 'bookmark').length} 个`)),
+    h('section.stat-card.is-wide', h('h2', range <= 30 ? '每天读了多久' : range === 90 ? '每周读了多久' : '每月读了多久'), barChart),
+    h('section.stat-card' + (cols > 14 ? '.is-wide' : '.is-cal'), h('h2', '阅读日历'), calendar),
+    h('section.stat-card', h('h2', '一天里的阅读节律'),
+      h('div.clock-wrap', svg),
+      h('p.stat-note', hourTotal ? `夜里 22 点到早上 6 点读的占 ${Math.round((night / hourTotal) * 100)}%` : '从这个版本开始记录分时段的数据，读一会儿就会出现。')),
+    h('section.stat-card' + (cols > 14 ? '' : '.is-wide'), h('h2', '一周里哪天读得多'),
+      h('div.week-rows', week.map(({ w, sec }) => h('div.week-row', { 'data-tip': `周${'日一二三四五六'[w]}：${dur(sec)}` },
+        h('span', '周' + '日一二三四五六'[w]), h('span.week-track', h('span', { style: `width:${(sec / wMax) * 100}%` })), h('small', sec ? dur(sec) : '—'))))),
+    h('section.stat-card.is-wide', h('h2', '每本书读了多久'),
+      bookRows.length ? h('div.stat-books', bookRows) : h('p.stat-empty', '这段时间还没有阅读记录。打开一本书读一会儿，这里就会有数据。')),
+    recent.length > 0 && h('section.stat-card.is-wide', h('h2', '这段时间划下的句子'),
+      h('div.stat-quotes', recent.map((m) => h('button.stat-quote', { type: 'button', style: `--hl:${HL_COLORS[m.color] || HL_COLORS.blue}`, onclick: () => openBook(m.bookId, m.id) },
+        h('q', m.excerpt), h('small', `《${store.seriesLabel(state.books[m.bookId] || { title: '' })}》${m.chapter ? ' · ' + m.chapter : ''}`))))),
+  )));
 }
 
 // ---------- 设置 ----------
@@ -1314,6 +1512,13 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('online', () => store.sync().catch(() => {}));
 // 窗口变窄后，书架旁边自动打开的详情要收起来（手机上它会盖住整个屏幕）
 window.addEventListener('resize', () => { if (view.autoDetail && window.innerWidth <= 1180 && els) hideDetail(); });
+// 别的设备改过的设置同步过来了：重新套用主题、视图
+window.addEventListener('settings-synced', () => {
+  applyTheme();
+  view.layout = prefs.get('layout', view.layout); view.sort = prefs.get('sort', view.sort);
+  document.body.classList.toggle('no-pill', !prefs.get('pill', true));
+  if (els) renderAll();
+});
 // 阅读器里点“去设置”：回到书架后打开对应的设置页
 window.addEventListener('open-settings', (e) => {
   view.settingsTab = e.detail || 'account';
