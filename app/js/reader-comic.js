@@ -6,9 +6,10 @@ import { h, icon, toast, menuButton, statusClock } from './ui.js';
 const DEFAULTS = { mode: 'page', rtl: true, spread: true };
 
 export async function open({ host, book, title = book.title, source, progress, onExit }) {
-  const zip = await ZipReader.open(source);
+  // 网盘里的图片文件夹本身就是一页一张图；压缩包则从里面挑出图片
+  const zip = source.isPageList ? source : await ZipReader.open(source);
   const entries = zip.entries.filter((e) => !e.isDir && isImageName(e.name)).sort((a, b) => natural(a.name, b.name));
-  if (!entries.length) throw new Error('压缩包里没有图片');
+  if (!entries.length) throw new Error(source.isPageList ? '这个文件夹里没有图片' : '压缩包里没有图片');
   const total = entries.length;
   const settings = { ...DEFAULTS, ...prefs.get('comic', {}) };
   let page = Math.min(total - 1, Math.max(0, Number(progress?.loc?.page) || 0));

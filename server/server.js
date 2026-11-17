@@ -21,7 +21,12 @@ const OPEN_SIGNUP = process.env.OPEN_SIGNUP === '1';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const APP_DIR = path.resolve(process.env.APP_DIR || path.join(__dirname, '..', 'app'));
 const MAX_BOOK_BYTES = Number(process.env.MAX_BOOK_MB || 2048) * 1024 * 1024;
-const VERSION = '0.8.1';
+const VERSION = '0.9.0';
+// 百度网盘开放平台应用（也可以每个账号在设置里自己填）
+const BAIDU_APP_KEY = process.env.BAIDU_APP_KEY || '';
+const BAIDU_SECRET_KEY = process.env.BAIDU_SECRET_KEY || '';
+const BAIDU_OPENAPI = process.env.BAIDU_OPENAPI || 'https://openapi.baidu.com'; // 只在测试时换成模拟服务器
+const BAIDU_PAN = process.env.BAIDU_PAN || 'https://pan.baidu.com';
 
 if (!KEY || KEY.length < 8) {
   console.error('请先设置邀请码（至少 8 位）：SHIORI_KEY=xxxxxxxx node server.js');
@@ -36,7 +41,7 @@ for (const d of [DATA_DIR, BOOKS_DIR, COVERS_DIR, AVATARS_DIR]) fs.mkdirSync(d, 
 
 // ---------- 数据库（一个 JSON 文件，原子写入） ----------
 // 结构：{ version: 2, users: { uid: 用户 }, tokens: { 令牌哈希: { uid } }, libs: { uid: 书库 }, legacy?: 旧版单人书库 }
-const emptyLib = () => ({ books: {}, collections: {}, progress: {}, marks: {}, stats: {}, hours: {}, series: {}, settings: null });
+const emptyLib = () => ({ books: {}, collections: {}, progress: {}, marks: {}, stats: {}, hours: {}, series: {}, settings: null, cloud: {}, cloudPages: {} });
 let db = { version: 2, users: {}, tokens: {}, libs: {} };
 if (fs.existsSync(DB_FILE)) {
   const raw = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
@@ -304,6 +309,213 @@ async function aiProxy(req, res) {
   Readable.fromWeb(upstream.body).on('error', () => res.destroy()).pipe(res);
 }
 
+// ---------- 百度网盘 ----------
+// 授权用“设备码模式”：服务器向百度要一个用户码，用户在手机或电脑上扫码 / 输入用户码同意，服务器轮询拿到令牌。
+// 令牌只存在服务器上，不发给客户端。读书时服务器带着令牌去百度取文件，按需转发（支持 Range，只取要看的那几页）。
+const BAIDU_UA = 'pan.baidu.com'; // 百度要求下载时用这个 User-Agent，大文件不带会被拒
+const dlinkCache = new Map(); // fsid → { url, at }，百度的下载地址 8 小时有效
+
+class BaiduError extends Error {
+  constructor(message, status = 502, code = '') { super(message); this.status = status; this.code = code; }
+}
+const baiduApp = (lib) => {
+  const c = lib.cloud.baidu || {};
+  return { key: c.appKey || BAIDU_APP_KEY, secret: c.secretKey || BAIDU_SECRET_KEY, own: !!c.appKey };
+};
+async function baiduFetch(url, opts = {}) {
+  let r;
+  try { r = await fetch(url, { ...opts, headers: { 'User-Agent': BAIDU_UA, ...(opts.headers || {}) } }); }
+  catch (e) { throw new BaiduError(`服务器连不上百度网盘：${e.message}`); }
+  return r;
+}
+async function baiduJson(url, opts) {
+  const r = await baiduFetch(url, opts);
+  const data = await r.json().catch(() => ({}));
+  const errno = data.errno ?? data.error_code;
+  if (errno === -6 || errno === 111 || errno === 110 || data.error === 'invalid_grant' || data.error === 'expired_token') {
+    throw new BaiduError('百度网盘的授权失效了，请在设置里重新连接', 401, 'auth');
+  }
+  if (errno === 31034 || errno === 42213) throw new BaiduError('百度网盘接口调用太频繁，稍等一会儿再试', 429);
+  if (errno && errno !== 0) throw new BaiduError(`百度网盘返回错误（${errno}${data.errmsg ? '：' + data.errmsg : ''}）`);
+  if (data.error) throw new BaiduError(data.error_description || data.error, 400, data.error);
+  return data;
+}
+async function baiduOAuth(params) {
+  const r = await baiduFetch(`${BAIDU_OPENAPI}/oauth/2.0/token?${new URLSearchParams(params)}`);
+  return r.json().catch(() => ({}));
+}
+function keepTokens(c, t) {
+  c.accessToken = t.access_token; c.refreshToken = t.refresh_token || c.refreshToken;
+  c.expiresAt = Date.now() + (Number(t.expires_in) || 2592000) * 1000;
+}
+/** 拿一个能用的 access_token：快过期（剩不到一天）就先用 refresh_token 换新的 */
+async function baiduToken(lib) {
+  const c = lib.cloud.baidu;
+  if (!c?.accessToken) throw new BaiduError('还没有连接百度网盘', 401, 'auth');
+  if (c.expiresAt - Date.now() > 86400000) return c.accessToken;
+  const app = baiduApp(lib);
+  const t = await baiduOAuth({ grant_type: 'refresh_token', refresh_token: c.refreshToken, client_id: app.key, client_secret: app.secret });
+  if (!t.access_token) throw new BaiduError('百度网盘的授权过期了，请在设置里重新连接', 401, 'auth');
+  keepTokens(c, t); save();
+  return c.accessToken;
+}
+async function baiduDlink(lib, fsid, fresh = false) {
+  const hit = dlinkCache.get(fsid);
+  if (!fresh && hit && Date.now() - hit.at < 7 * 3600000) return hit.url;
+  const token = await baiduToken(lib);
+  const data = await baiduJson(`${BAIDU_PAN}/rest/2.0/xpan/multimedia?${new URLSearchParams({ method: 'filemetas', access_token: token, fsids: JSON.stringify([Number(fsid)]), dlink: '1' })}`);
+  const dlink = data.list?.[0]?.dlink;
+  if (!dlink) throw new BaiduError('网盘里找不到这个文件，可能已经被移动或删除', 404);
+  const url = `${dlink}&access_token=${encodeURIComponent(token)}`;
+  dlinkCache.set(fsid, { url, at: Date.now() });
+  if (dlinkCache.size > 2000) dlinkCache.delete(dlinkCache.keys().next().value);
+  return url;
+}
+async function baiduPrefetch(lib, fsids) {
+  const need = fsids.filter((f) => { const hit = dlinkCache.get(f); return !hit || Date.now() - hit.at > 6 * 3600000; }).slice(0, 100);
+  if (!need.length) return;
+  const token = await baiduToken(lib);
+  const data = await baiduJson(`${BAIDU_PAN}/rest/2.0/xpan/multimedia?${new URLSearchParams({ method: 'filemetas', access_token: token, fsids: JSON.stringify(need.map(Number)), dlink: '1' })}`);
+  for (const f of data.list || []) if (f.dlink) dlinkCache.set(String(f.fs_id), { url: `${f.dlink}&access_token=${encodeURIComponent(token)}`, at: Date.now() });
+}
+/** 把网盘里的文件按需转发给客户端，Range 原样带过去 */
+async function baiduStream(req, res, lib, fsid, name, cacheable = false) {
+  const ctrl = new AbortController();
+  req.on('close', () => ctrl.abort());
+  const headers = req.headers.range ? { Range: req.headers.range } : {};
+  try {
+    let r;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const url = await baiduDlink(lib, fsid, attempt > 0);
+      r = await baiduFetch(url, { headers, signal: ctrl.signal, redirect: 'follow', method: req.method === 'HEAD' ? 'HEAD' : 'GET' });
+      if (r.status !== 403 && r.status !== 401 && r.status !== 404) break; // 下载地址过期了就重新要一个
+      await r.body?.cancel().catch(() => {});
+    }
+    if (!r.ok) return fail(res, 502, `百度网盘拒绝了下载（${r.status}）`);
+    const out = {
+      'Content-Type': mimeByName(name), 'Accept-Ranges': 'bytes',
+      'Cache-Control': cacheable ? 'private, max-age=86400' : 'no-store',
+    };
+    for (const k of ['content-length', 'content-range']) { const v = r.headers.get(k); if (v) out[k] = v; }
+    res.writeHead(r.status, out);
+    if (req.method === 'HEAD' || !r.body) return res.end();
+    Readable.fromWeb(r.body).on('error', () => res.destroy()).pipe(res);
+  } catch (e) {
+    if (ctrl.signal.aborted) return;
+    return fail(res, e.status || 502, e.message);
+  }
+}
+const mimeByName = (n = '') => ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', avif: 'image/avif', bmp: 'image/bmp', epub: 'application/epub+zip' })[String(n).split('.').pop().toLowerCase()] || 'application/octet-stream';
+const IMAGE_RE = /\.(jpe?g|png|webp|gif|avif|bmp)$/i;
+const naturalCmp = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+
+async function baiduList(lib, dir) {
+  const token = await baiduToken(lib);
+  const all = [];
+  for (let start = 0; start < 20000; start += 1000) {
+    const data = await baiduJson(`${BAIDU_PAN}/rest/2.0/xpan/file?${new URLSearchParams({ method: 'list', access_token: token, dir, order: 'name', start: String(start), limit: '1000', web: '0' })}`);
+    const list = data.list || [];
+    all.push(...list.map((f) => ({ fsid: String(f.fs_id), name: f.server_filename, path: f.path, size: f.size || 0, isDir: f.isdir === 1, mtime: (f.server_mtime || 0) * 1000 })));
+    if (list.length < 1000) break;
+  }
+  return all.sort((a, b) => (b.isDir - a.isDir) || naturalCmp(a.name, b.name));
+}
+
+async function baiduApi(req, res, seg, q, lib) {
+  const M = req.method;
+  const c = lib.cloud.baidu || (lib.cloud.baidu = {});
+  try {
+    if (!seg.length && M === 'GET') {
+      const app = baiduApp(lib);
+      return json(res, 200, {
+        configured: !!(app.key && app.secret), ownApp: app.own, appKey: app.own ? c.appKey : '', serverApp: !!(BAIDU_APP_KEY && BAIDU_SECRET_KEY),
+        connected: !!c.accessToken, name: c.name || '', avatar: c.avatar || '', quota: c.quota || null,
+      });
+    }
+    if (seg[0] === 'app' && M === 'PUT') { // 自己的应用：AppKey + SecretKey
+      const body = await readJson(req);
+      const key = str(body.appKey, 100), secret = str(body.secretKey, 100);
+      if (!key || !secret) return fail(res, 400, 'AppKey 和 SecretKey 都要填');
+      if (key !== c.appKey) Object.assign(c, { accessToken: '', refreshToken: '', expiresAt: 0, name: '', avatar: '' });
+      c.appKey = key; c.secretKey = secret; save();
+      return json(res, 200, { ok: true });
+    }
+    if (!seg.length && M === 'DELETE') { // 断开：只清令牌，保留应用信息
+      Object.assign(c, { accessToken: '', refreshToken: '', expiresAt: 0, name: '', avatar: '', quota: null, device: null }); save();
+      return json(res, 200, { ok: true });
+    }
+    if (seg[0] === 'device' && M === 'POST') { // 第一步：要用户码和二维码
+      const app = baiduApp(lib);
+      if (!app.key) return fail(res, 400, '先填好百度网盘应用的 AppKey 和 SecretKey');
+      const r = await baiduFetch(`${BAIDU_OPENAPI}/oauth/2.0/device/code?${new URLSearchParams({ response_type: 'device_code', client_id: app.key, scope: 'basic,netdisk' })}`);
+      const d = await r.json().catch(() => ({}));
+      if (!d.device_code) return fail(res, 400, `百度没有给出授权码：${d.error_description || d.error || r.status}（检查 AppKey 是否正确）`);
+      c.device = { code: d.device_code, expiresAt: Date.now() + (d.expires_in || 1800) * 1000 };
+      return json(res, 200, {
+        userCode: d.user_code, qrcodeUrl: d.qrcode_url, interval: d.interval || 5, expiresIn: d.expires_in || 1800,
+        verificationUrl: `https://openapi.baidu.com/device?display=mobile&code=${encodeURIComponent(d.user_code)}`,
+      });
+    }
+    if (seg[0] === 'poll' && M === 'POST') { // 第二步：用户同意了没有
+      if (!c.device || c.device.expiresAt < Date.now()) return json(res, 200, { status: 'expired' });
+      const app = baiduApp(lib);
+      const t = await baiduOAuth({ grant_type: 'device_token', code: c.device.code, client_id: app.key, client_secret: app.secret });
+      if (t.error === 'authorization_pending' || t.error === 'slow_down') return json(res, 200, { status: 'pending' });
+      if (!t.access_token) return json(res, 200, { status: 'failed', message: t.error_description || t.error || '授权失败' });
+      keepTokens(c, t); c.device = null;
+      try {
+        const u = await baiduJson(`${BAIDU_PAN}/rest/2.0/xpan/nas?method=uinfo&access_token=${encodeURIComponent(c.accessToken)}`);
+        c.name = u.netdisk_name || u.baidu_name || ''; c.avatar = u.avatar_url || '';
+        const qd = await baiduJson(`${BAIDU_PAN}/api/quota?access_token=${encodeURIComponent(c.accessToken)}`).catch(() => null);
+        if (qd) c.quota = { used: qd.used, total: qd.total };
+      } catch { /* 用户信息拿不到不影响使用 */ }
+      save();
+      return json(res, 200, { status: 'ok', name: c.name });
+    }
+    if (seg[0] === 'list' && M === 'GET') {
+      const dir = q.get('dir') || '/';
+      return json(res, 200, { dir, items: await baiduList(lib, dir) });
+    }
+    if (seg[0] === 'add' && M === 'POST') { // 把网盘里的文件 / 图片文件夹放上书架（不下载、不占服务器空间）
+      const body = await readJson(req, 512 * 1024);
+      const added = [];
+      const now = Date.now();
+      for (const it of (Array.isArray(body.items) ? body.items : []).slice(0, 200)) {
+        const base = {
+          id: newId(), author: '', illustrator: '', publisher: '', status: '', rating: 0, review: '', description: '',
+          series: str(it.series, 200), volume: volumeOf(it.volume), collections: (Array.isArray(body.collections) ? body.collections : []).filter((x) => lib.collections[x]),
+          hasCover: false, addedAt: now, updatedAt: now,
+        };
+        if (it.kind === 'file') {
+          const ext = String(it.name || '').split('.').pop().toLowerCase();
+          const format = ext === 'epub' ? 'epub' : (ext === 'cbz' || ext === 'zip') ? 'cbz' : '';
+          if (!format || !it.fsid) continue;
+          const dup = Object.values(lib.books).find((b) => b.source?.fsid === String(it.fsid));
+          if (dup) { added.push({ book: dup, duplicate: true }); continue; }
+          const book = { ...base, format, size: Number(it.size) || 0, title: str(it.title, 500) || String(it.name).replace(/\.[^.]+$/, ''), fileName: str(it.name), source: { type: 'baidu', fsid: String(it.fsid), path: str(it.path, 2000) } };
+          lib.books[book.id] = book; added.push({ book });
+        } else if (it.kind === 'dir') {
+          const dir = str(it.path, 2000);
+          const dup = Object.values(lib.books).find((b) => b.source?.type === 'baidu-dir' && b.source.path === dir);
+          if (dup) { added.push({ book: dup, duplicate: true }); continue; }
+          const pages = (await baiduList(lib, dir)).filter((f) => !f.isDir && IMAGE_RE.test(f.name)).slice(0, 5000);
+          if (!pages.length) continue;
+          const book = { ...base, format: 'cbz', size: pages.reduce((n, p) => n + p.size, 0), title: str(it.title, 500) || dir.split('/').pop(), fileName: dir.split('/').pop(), source: { type: 'baidu-dir', path: dir, count: pages.length } };
+          lib.books[book.id] = book;
+          lib.cloudPages[book.id] = pages.map((p) => ({ fsid: p.fsid, name: p.name, size: p.size }));
+          added.push({ book });
+        }
+      }
+      save();
+      return json(res, 200, { added });
+    }
+    return fail(res, 404, '没有这个接口');
+  } catch (e) {
+    if (e instanceof BaiduError) return fail(res, e.status, e.message);
+    throw e;
+  }
+}
+
 async function api(req, res, url) {
   const seg = url.pathname.split('/').filter(Boolean).slice(1); // 去掉 "api"
   const M = req.method;
@@ -352,7 +564,11 @@ async function api(req, res, url) {
     }
   }
 
-  if (seg[0] === 'state' && M === 'GET') return json(res, 200, { ...lib, user: publicUser(user), serverTime: Date.now() });
+  if (seg[0] === 'state' && M === 'GET') {
+    const { cloud, cloudPages, ...rest } = lib;
+    return json(res, 200, { ...rest, user: publicUser(user), serverTime: Date.now() });
+  }
+  if (seg[0] === 'cloud' && seg[1] === 'baidu') return baiduApi(req, res, seg.slice(2), q, lib);
   if (seg[0] === 'ai' && M === 'POST') return aiProxy(req, res);
 
   if (seg[0] === 'books') {
@@ -365,10 +581,22 @@ async function api(req, res, url) {
       return json(res, 200, { book });
     }
     if (seg.length === 2 && M === 'DELETE') {
-      delete lib.books[book.id]; delete lib.progress[book.id]; delete lib.marks[book.id]; save();
-      await fsp.rm(bookFile(book), { force: true });
+      delete lib.books[book.id]; delete lib.progress[book.id]; delete lib.marks[book.id]; delete lib.cloudPages[book.id]; save();
+      if (!book.source) await fsp.rm(bookFile(book), { force: true }); // 网盘里的书只删书架上的记录，网盘文件不动
       await fsp.rm(coverFile(book.id), { force: true });
       return json(res, 200, { ok: true });
+    }
+    if (book.source?.type === 'baidu' && seg[2] === 'file' && (M === 'GET' || M === 'HEAD')) return baiduStream(req, res, lib, book.source.fsid, book.fileName);
+    if (book.source?.type === 'baidu-dir' && seg[2] === 'pages' && M === 'GET') {
+      return json(res, 200, { pages: (lib.cloudPages[book.id] || []).map((p) => ({ name: p.name, size: p.size })) });
+    }
+    if (book.source?.type === 'baidu-dir' && seg[2] === 'page' && M === 'GET') {
+      const all = lib.cloudPages[book.id] || [], n = Number(seg[3]);
+      const pg = all[n];
+      if (!pg) return fail(res, 404, '没有这一页');
+      // 一次向百度要后面几十页的下载地址，翻页时就不用一页问一次
+      if (!dlinkCache.has(pg.fsid)) await baiduPrefetch(lib, all.slice(Math.max(0, n - 4), n + 60).map((p) => p.fsid)).catch(() => {});
+      return baiduStream(req, res, lib, pg.fsid, pg.name, true);
     }
     if (seg[2] === 'file' && (M === 'GET' || M === 'HEAD')) {
       return sendFile(req, res, bookFile(book), 'application/octet-stream', book.fileName || `${book.title}.${book.format}`);

@@ -604,19 +604,36 @@ function remoteOf(book) {
   return src;
 }
 
-/** 打开一本书用的数据源：本机有就用本机的，否则边读边从服务器取 */
+/** 网盘里的图片文件夹：一页一张图，按页向服务器要 */
+class PageListSource {
+  constructor(book) { this.book = book; this.isPageList = true; this.entries = []; }
+  async load() {
+    const { pages } = await apiJson(`/api/books/${this.book.id}/pages`);
+    this.entries = pages.map((p, i) => ({ name: p.name, size: p.size, index: i, isDir: false }));
+    return this;
+  }
+  async blobOf(entry) {
+    const res = await api(`/api/books/${this.book.id}/page/${entry.index}`);
+    return res.blob();
+  }
+}
+
+/** 打开一本书用的数据源：本机有就用本机的，否则边读边从服务器取（网盘里的书由服务器去网盘取） */
 export async function bookSource(book) {
   const cached = await local.get('files', book.id).catch(() => null);
   if (cached) return { source: cached, release() {} };
   if (!account()) throw new Error('这本书的文件不在这台设备上');
+  if (book.source?.type === 'baidu-dir') return { source: await new PageListSource(book).load(), release() {} };
   const src = remoteOf(book);
-  if (prefs.get('autoCache', true)) src.fill().catch(() => {});
+  // 网盘里的漫画往往很大，默认只取正在看的那几页，不在后台把整本拉下来
+  if (prefs.get('autoCache', true) && !book.source) src.fill().catch(() => {});
   return { source: src, release() { src.pause(); } };
 }
 
 /** 把整本书下载到本机（离线阅读用） */
 export async function downloadBook(book, onProgress) {
   if (state.downloaded.has(book.id)) return;
+  if (book.source?.type === 'baidu-dir') throw new ApiError('网盘里的图片文件夹只能在线看，不能下载到本机', 0);
   const src = remoteOf(book);
   const watch = (p) => onProgress?.(p);
   src.watchers.add(watch);
@@ -657,9 +674,9 @@ export function guessSeries(title) {
 }
 export const seriesLabel = (book) => (book.series ? `${book.series}${book.volume != null ? ` ${book.volume}` : ''}` : book.title);
 
-async function inspect(file) {
-  const name = file.name.replace(/\.[^.]+$/, '');
-  const ext = file.name.slice(file.name.lastIndexOf('.') + 1).toLowerCase();
+async function inspect(file, fileName = file.name) {
+  const name = fileName.replace(/\.[^.]+$/, '');
+  const ext = fileName.slice(fileName.lastIndexOf('.') + 1).toLowerCase();
   if (ext === 'epub') {
     const epub = await Epub.open(file);
     const cover = await epub.coverBlob().catch(() => null);
@@ -734,6 +751,55 @@ export async function importBook(file, collectionIds = []) {
   if (account()) { try { await local.put('files', saved.id, file.slice()); state.downloaded.add(saved.id); } catch { /* 忽略 */ } }
   persist(); emit();
   return { book: saved, duplicate };
+}
+
+// ---------- 百度网盘 ----------
+export const baidu = {
+  status: () => apiJson('/api/cloud/baidu'),
+  setApp: (appKey, secretKey) => apiJson('/api/cloud/baidu/app', 'PUT', { appKey, secretKey }),
+  device: () => apiJson('/api/cloud/baidu/device', 'POST', {}),
+  poll: () => apiJson('/api/cloud/baidu/poll', 'POST', {}),
+  disconnect: () => apiJson('/api/cloud/baidu', 'DELETE'),
+  list: (dir) => apiJson('/api/cloud/baidu/list?' + new URLSearchParams({ dir })),
+};
+/** 把网盘里的文件 / 图片文件夹放上书架：书架上只记位置，文件留在网盘里；然后从网盘里读出封面和书名 */
+export async function addFromBaidu(items, collectionIds = [], onStep) {
+  const { added } = await apiJson('/api/cloud/baidu/add', 'POST', { items, collections: collectionIds });
+  for (const { book } of added) state.books[book.id] = book;
+  persist(); emit();
+  let i = 0;
+  for (const { book, duplicate } of added) {
+    onStep?.(++i, added.length, book);
+    if (duplicate || book.hasCover) continue;
+    try { await finishCloudBook(book); } catch { /* 封面取不到不影响阅读 */ }
+  }
+  return added;
+}
+async function finishCloudBook(book) {
+  let info;
+  if (book.source?.type === 'baidu-dir') {
+    const src = await new PageListSource(book).load();
+    info = { cover: await src.blobOf(src.entries[0]), ...(book.series ? {} : guessSeries(book.title)) };
+  } else {
+    const src = remoteOf(book);
+    try { info = await inspect(src, book.fileName || `${book.title}.${book.format}`); }
+    finally { remotes.delete(book.id); }
+  }
+  const patch = {};
+  if (book.format === 'epub') {
+    for (const k of ['title', 'author', 'illustrator', 'publisher', 'description', 'published']) if (info[k]) patch[k] = info[k];
+  }
+  if (!book.series && info.series) { patch.series = info.series; patch.volume = info.volume; }
+  if (Object.keys(patch).length) state.books[book.id] = (await apiJson('/api/books/' + book.id, 'PATCH', patch)).book;
+  if (info.cover) {
+    const jpg = await shrinkCover(info.cover).catch(() => null);
+    if (jpg) {
+      const saved = (await (await api(`/api/books/${book.id}/cover`, { method: 'PUT', body: jpg })).json()).book;
+      state.books[book.id] = saved;
+      local.put('covers', book.id, { at: saved.coverAt, blob: jpg }).catch(() => {});
+    }
+  }
+  persist(); emit();
 }
 
 export async function updateBook(id, patch) {

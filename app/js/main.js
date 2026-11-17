@@ -215,7 +215,7 @@ function renderShelf() {
   });
   els.selectBtn = h('button.icon-btn', { type: 'button', onclick: () => (view.selecting ? exitSelect() : enterSelect()) }, icon('checkCircle'));
   els.syncBtn = h('button.icon-btn', { type: 'button', onclick: manualSync });
-  els.importBtn = h('button.btn.is-primary', { type: 'button', onclick: () => fileInput.click() }, icon('plus', 18), '导入');
+  els.importBtn = h('button.btn.is-primary', { type: 'button', 'aria-haspopup': 'menu', onclick: () => importMenu(els.importBtn) }, icon('plus', 18), '导入');
   els.intro = h('section.series-intro', { hidden: true });
   els.main = h('main.main', h('header.topbar', els.heading, els.tools), els.intro, els.body, fileInput);
 
@@ -619,7 +619,7 @@ function renderEmpty() {
   else if (!Object.keys(state.books).length) {
     title = '书架还是空的';
     text = store.isConfigured() ? '导入 EPUB 小说或 CBZ / ZIP 漫画，它们会出现在你的每台设备上。' : '导入 EPUB 小说或 CBZ / ZIP 漫画。现在是本机书库，登录账号后可以同步到其他设备。';
-    action = h('button.btn.is-primary', { type: 'button', onclick: () => els.fileInput.click() }, icon('plus', 18), '导入第一本书');
+    action = h('button.btn.is-primary', { type: 'button', onclick: (e) => importMenu(e.currentTarget) }, icon('plus', 18), '导入第一本书');
   } else if (state.collections[view.filter]) { title = '这个合集还没有书'; text = '在书架上长按（或右键）一本书，选择“加入合集”。也可以直接在这里导入。'; }
   else if (view.filter === 'reading') { title = '没有正在读的书'; text = '打开任意一本书，它就会出现在这里。'; }
   else if (view.filter === 'finished') { title = '还没有读完的书'; text = '读到最后一页的书会自动出现在这里，也可以多选后手动标记。'; }
@@ -1281,8 +1281,8 @@ const row = (label, control, hint) => h('div.set-row', h('div.set-label', h('spa
 
 function renderSettings() {
   els.body.className = 'body settings';
-  const tabs = [['account', 'user', '账号'], ['look', 'palette', '外观'], ['ai', 'sparkle', '阅读助手'], ['tts', 'headphones', '听书'], ['data', 'database', '存储与同步']];
-  const content = { account: settingsAccount, look: settingsLook, ai: settingsAi, tts: settingsTts, data: settingsData }[view.settingsTab]();
+  const tabs = [['account', 'user', '账号'], ['look', 'palette', '外观'], ['ai', 'sparkle', '阅读助手'], ['tts', 'headphones', '听书'], ['cloud', 'cloud', '网盘'], ['data', 'database', '存储与同步']];
+  const content = { account: settingsAccount, look: settingsLook, ai: settingsAi, tts: settingsTts, cloud: settingsCloud, data: settingsData }[view.settingsTab]();
   els.body.replaceChildren(
     h('nav.set-tabs', { role: 'tablist' }, tabs.map(([k, ic, t]) => h('button' + (view.settingsTab === k ? '.is-on' : ''), {
       type: 'button', role: 'tab', 'aria-selected': String(view.settingsTab === k), onclick: () => { view.settingsTab = k; renderBody(); },
@@ -1485,6 +1485,215 @@ function settingsData() {
 }
 
 // ---------- 导入 ----------
+// ---------- 导入菜单：本机文件 / 百度网盘 ----------
+function popMenu(anchor, sections) {
+  document.querySelector('.pop-menu')?.remove();
+  const menu = h('div.pop-menu', { role: 'menu' }, sections.map((sec, i) => [
+    i > 0 && h('hr.pop-sep'),
+    sec.title && h('div.pop-title', sec.title),
+    sec.items.map((it) => h('button.pop-item', { type: 'button', role: 'menuitem', onclick: () => { close(); it.onclick(); } },
+      h('span.pop-icon', icon(it.icon, 20)), h('span.pop-text', h('b', it.label), it.sub && h('small', it.sub)))),
+  ]));
+  const close = () => { menu.remove(); document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', esc, true); };
+  const outside = (e) => { if (!menu.contains(e.target) && !anchor.contains(e.target)) close(); };
+  const esc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); anchor.focus(); } };
+  document.body.append(menu);
+  const r = anchor.getBoundingClientRect();
+  menu.style.top = `${r.bottom + 8}px`;
+  menu.style.left = `${Math.max(8, Math.min(innerWidth - menu.offsetWidth - 8, r.right - menu.offsetWidth))}px`;
+  setTimeout(() => { document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', esc, true); });
+  menu.querySelector('button')?.focus();
+}
+function importMenu(anchor) {
+  popMenu(anchor, [
+    { items: [{ icon: 'upload', label: '从这台设备选文件', sub: 'EPUB、CBZ / ZIP', onclick: () => els.fileInput.click() }] },
+    { title: '网盘', items: [{ icon: 'cloud', label: '百度网盘', sub: '文件留在网盘里，看的时候按需读取', onclick: () => openBaiduBrowser() }] },
+  ]);
+}
+
+// ---------- 百度网盘 ----------
+const https = (u) => String(u || '').replace(/^http:\/\//, 'https://');
+let baiduPoll = null; // 正在等用户扫码授权
+function stopBaiduPoll() { clearTimeout(baiduPoll); baiduPoll = null; }
+
+function settingsCloud() {
+  const card = h('section.set-card.cloud-card', h('div.cloud-head', h('span.cloud-logo', icon('cloud', 22)), h('div', h('h2', '百度网盘'), h('p.set-sub', '漫画放在网盘里，书架上只记位置；阅读时由你的服务器去网盘取正在看的那几页，不占服务器空间。'))));
+  const body = h('div.cloud-body', h('p.muted', '正在读取网盘状态…'));
+  card.append(body);
+  if (!store.account()) {
+    body.replaceChildren(h('p.muted', '网盘需要登录账号后使用：授权和下载都经过你自己的服务器转发。'));
+    return card;
+  }
+  const draw = async () => {
+    stopBaiduPoll();
+    let st;
+    try { st = await store.baidu.status(); } catch (e) { body.replaceChildren(h('p.form-error', e.message)); return; }
+    if (!body.isConnected) return;
+    if (st.connected) {
+      const q = st.quota;
+      body.replaceChildren(
+        h('div.cloud-user',
+          st.avatar ? h('img.cloud-avatar', { src: https(st.avatar), alt: '', referrerPolicy: 'no-referrer' }) : h('span.cloud-avatar', icon('user', 20)),
+          h('div', h('b', st.name || '已连接'), q ? h('small', `已用 ${fmtSize(q.used)} / ${fmtSize(q.total)}`) : h('small', '已连接')),
+          q && h('span.cloud-quota', h('span', { style: `width:${Math.min(100, (q.used / Math.max(1, q.total)) * 100)}%` }))),
+        h('div.cloud-actions',
+          h('button.btn.is-primary', { type: 'button', onclick: () => openBaiduBrowser() }, icon('folder', 18), '浏览网盘，添加漫画'),
+          h('button.btn', { type: 'button', onclick: async () => { if (await confirmDialog('断开百度网盘', '断开后，书架上网盘里的书会暂时打不开，重新连接同一个账号就能恢复。', { ok: '断开', danger: true })) { await guard(() => store.baidu.disconnect(), '已断开'); draw(); } } }, '断开'),
+          st.ownApp && h('button.btn.is-quiet', { type: 'button', onclick: () => drawApp(st) }, '更换应用')));
+      return;
+    }
+    if (!st.configured) return drawApp(st);
+    body.replaceChildren(
+      h('p', '还没有连接。点下面的按钮后，用百度网盘 App 扫码，或者在浏览器里登录百度账号同意授权。'),
+      h('div.cloud-actions',
+        h('button.btn.is-primary', { type: 'button', onclick: connect }, icon('cloud', 18), '连接百度网盘'),
+        st.ownApp && h('button.btn.is-quiet', { type: 'button', onclick: () => drawApp(st) }, '更换应用')));
+  };
+  const drawApp = (st) => {
+    const key = h('input.field', { type: 'text', value: st.appKey || '', placeholder: 'AppKey', autocomplete: 'off', spellcheck: false });
+    const secret = h('input.field', { type: 'password', placeholder: st.ownApp ? '已保存，不改就留空…（重新填写才会更新）' : 'SecretKey', autocomplete: 'off' });
+    const err = h('p.form-error', { hidden: true });
+    body.replaceChildren(
+      h('ol.cloud-steps',
+        h('li', '用百度账号登录 ', h('a', { href: 'https://pan.baidu.com/union/console', target: '_blank', rel: 'noopener' }, '百度网盘开放平台'), '，按提示完成开发者认证（个人开发者就行）。'),
+        h('li', '在控制台“创建应用”，类别选“软件”，名字随意。'),
+        h('li', '打开应用详情，把 AppKey 和 SecretKey 复制到下面。SecretKey 只保存在你的服务器上。')),
+      st.serverApp && h('p.field-hint', '你的服务器已经在环境变量里配置了应用，也可以不填，直接返回连接。'),
+      h('form.cloud-form', {
+        onsubmit: async (e) => {
+          e.preventDefault();
+          err.hidden = true;
+          try { await store.baidu.setApp(key.value.trim(), secret.value.trim()); toast('应用信息已保存'); draw(); }
+          catch (x) { err.textContent = x.message; err.hidden = false; }
+        },
+      },
+      h('div.field-pair.is-even', h('div', h('label.field-label', 'AppKey'), key), h('div', h('label.field-label', 'SecretKey'), secret)),
+      err,
+      h('div.cloud-actions', h('button.btn.is-primary', { type: 'submit' }, '保存'), (st.configured) && h('button.btn', { type: 'button', onclick: draw }, '返回'))));
+  };
+  const connect = async () => {
+    let d;
+    try { d = await store.baidu.device(); } catch (e) { toast(e.message, { error: true }); return; }
+    const status = h('p.cloud-wait', '等待授权…');
+    body.replaceChildren(
+      h('div.cloud-auth',
+        h('img.cloud-qr', { src: https(d.qrcodeUrl), alt: '授权二维码', referrerPolicy: 'no-referrer' }),
+        h('div',
+          h('p', '用百度网盘 App 扫码，或者点下面的链接在浏览器里授权：'),
+          h('p.cloud-code', h('small', '用户码'), h('b', d.userCode)),
+          h('a.btn', { href: d.verificationUrl, target: '_blank', rel: 'noopener' }, '打开授权页'),
+          status,
+          h('button.btn.is-quiet', { type: 'button', onclick: draw }, '取消'))));
+    const until = Date.now() + d.expiresIn * 1000;
+    const tick = async () => {
+      if (!body.isConnected) return stopBaiduPoll();
+      if (Date.now() > until) { status.textContent = '二维码过期了，请重新连接。'; return; }
+      try {
+        const r = await store.baidu.poll();
+        if (r.status === 'ok') { toast(`已连接百度网盘${r.name ? `：${r.name}` : ''}`); draw(); return; }
+        if (r.status === 'expired') { status.textContent = '二维码过期了，请重新连接。'; return; }
+        if (r.status === 'failed') { status.textContent = r.message; return; }
+      } catch (e) { status.textContent = e.message; }
+      baiduPoll = setTimeout(tick, Math.max(3, d.interval) * 1000);
+    };
+    baiduPoll = setTimeout(tick, Math.max(3, d.interval) * 1000);
+  };
+  draw();
+  return card;
+}
+
+const BOOK_RE = /\.(epub|cbz|zip)$/i;
+const IMG_RE = /\.(jpe?g|png|webp|gif|avif|bmp)$/i;
+const fileKind = (it) => (it.isDir ? 'folder' : /\.epub$/i.test(it.name) ? 'books' : /\.(cbz|zip)$/i.test(it.name) ? 'pages' : IMG_RE.test(it.name) ? 'pages' : 'list');
+
+/** 把选中的文件 / 文件夹变成要放上书架的条目：
+ *  文件夹里直接就是图片 → 一本漫画；里面是一个个子文件夹 / 压缩包 → 每个算一卷，系列名用文件夹名 */
+async function planItems(selected) {
+  const out = [];
+  for (const it of selected) {
+    if (!it.isDir) { out.push({ kind: 'file', fsid: it.fsid, name: it.name, path: it.path, size: it.size, ...(store.guessSeries(it.name.replace(/\.[^.]+$/, '')) || {}) }); continue; }
+    const { items } = await store.baidu.list(it.path);
+    if (items.some((x) => !x.isDir && IMG_RE.test(x.name))) { out.push({ kind: 'dir', path: it.path, title: it.name, ...(store.guessSeries(it.name) || {}) }); continue; }
+    const vols = items.filter((x) => x.isDir || BOOK_RE.test(x.name));
+    vols.forEach((x, i) => {
+      const title = x.name.replace(/\.[^.]+$/, '');
+      const num = store.guessSeries(title)?.volume ?? (Number((title.match(/\d+(\.\d+)?/) || [])[0]) || i + 1);
+      out.push(x.isDir ? { kind: 'dir', path: x.path, title, series: it.name, volume: num } : { kind: 'file', fsid: x.fsid, name: x.name, path: x.path, size: x.size, series: it.name, volume: num });
+    });
+  }
+  return out;
+}
+
+async function openBaiduBrowser() {
+  if (!store.account()) { toast('网盘需要登录账号后使用', { error: true }); return; }
+  let st;
+  try { st = await store.baidu.status(); } catch (e) { toast(e.message, { error: true }); return; }
+  if (!st.connected) {
+    if (await confirmDialog('还没有连接百度网盘', '先在“设置 → 网盘”里连接你的百度网盘账号。', { ok: '去连接' })) { view.settingsTab = 'cloud'; setFilter('settings'); }
+    return;
+  }
+  const into = state.collections[view.filter] ? [view.filter] : [];
+  await dialog('从百度网盘添加', (close) => {
+    let dir = prefs.get('baiduDir', '/');
+    const picked = new Map(); // path → item
+    const crumbs = h('nav.cd-crumbs', { 'aria-label': '当前位置' });
+    const list = h('div.cd-list', { role: 'list' });
+    const count = h('span.cd-count');
+    const addBtn = h('button.btn.is-primary', { type: 'button', disabled: true, onclick: add }, '放上书架');
+    const drawCount = () => {
+      count.textContent = picked.size ? `已选 ${picked.size} 项` : '勾选 EPUB、CBZ / ZIP，或者整个漫画文件夹';
+      addBtn.disabled = !picked.size;
+    };
+    async function go(path) {
+      dir = path; prefs.set('baiduDir', path);
+      const parts = path.split('/').filter(Boolean);
+      crumbs.replaceChildren(
+        h('button', { type: 'button', onclick: () => go('/') }, '百度网盘'),
+        ...parts.flatMap((p, i) => [h('span', '/'), h('button', { type: 'button', onclick: () => go('/' + parts.slice(0, i + 1).join('/')) }, p)]));
+      list.replaceChildren(h('p.cd-empty', '正在读取…'));
+      let items;
+      try { items = (await store.baidu.list(path)).items; }
+      catch (e) {
+        if (path !== '/') { prefs.set('baiduDir', '/'); return go('/'); }
+        list.replaceChildren(h('p.cd-empty.form-error', e.message)); return;
+      }
+      if (dir !== path) return;
+      const usable = items.filter((it) => it.isDir || BOOK_RE.test(it.name));
+      const images = items.filter((it) => !it.isDir && IMG_RE.test(it.name)).length;
+      list.replaceChildren(
+        images > 0 ? h('div.cd-hint', icon('pages', 18), `这个文件夹里有 ${images} 张图片。勾选上一级里的这个文件夹，就能把它当成一本漫画放上书架。`) : '',
+        ...(usable.length ? usable.map((it) => {
+          const box = h('input', { type: 'checkbox', checked: picked.has(it.path), 'aria-label': `选择 ${it.name}`, onchange: () => { if (box.checked) picked.set(it.path, it); else picked.delete(it.path); drawCount(); } });
+          return h('div.cd-row' + (it.isDir ? '.is-dir' : ''), { role: 'listitem' },
+            box,
+            h('button.cd-name', { type: 'button', onclick: () => (it.isDir ? go(it.path) : (box.checked = !box.checked, box.dispatchEvent(new Event('change')))) },
+              h('span.cd-icon', icon(fileKind(it), 20)),
+              h('span.cd-label', it.name),
+              h('small', it.isDir ? '' : fmtSize(it.size)),
+              it.isDir && icon('chevronRight', 16)));
+        }) : [h('p.cd-empty', images ? '' : '这里没有可以添加的书（支持 EPUB、CBZ / ZIP 和装着图片的文件夹）。')]));
+    }
+    async function add() {
+      addBtn.disabled = true; addBtn.textContent = '正在整理…';
+      try {
+        const items = await planItems([...picked.values()]);
+        if (!items.length) { toast('选中的内容里没有能看的书', { error: true }); addBtn.textContent = '放上书架'; drawCount(); return; }
+        close(true);
+        const t = toast('', { sticky: true });
+        t.update(`正在添加 ${items.length} 项…`);
+        const added = await store.addFromBaidu(items, into, (i, n, b) => t.update(`正在读取封面 ${i} / ${n}：${store.seriesLabel(b)}`));
+        const dup = added.filter((a) => a.duplicate).length;
+        t.done(`已添加 ${added.length - dup} 本${dup ? `，${dup} 本已在书架上` : ''}`);
+      } catch (e) { toast(e.message, { error: true }); addBtn.textContent = '放上书架'; drawCount(); }
+    }
+    drawCount(); go(dir);
+    return h('div.dialog-body.cloud-browser',
+      crumbs, list,
+      h('p.field-hint', '文件不会复制到你的服务器。看书时服务器按需从网盘取那几页，所以第一次翻开会比本地书慢一点。'),
+      h('div.dialog-actions', count, h('button.btn', { type: 'button', onclick: () => close() }, '取消'), addBtn));
+  }, { wide: true });
+}
+
 async function importFiles(files) {
   files = files.filter((f) => /\.(epub|cbz|zip)$/i.test(f.name));
   if (!files.length) { toast('只支持 EPUB 和 CBZ / ZIP 文件', { error: true }); return; }
