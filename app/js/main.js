@@ -572,8 +572,9 @@ function renderShelf3d(list) {
 }
 function spineSpec(b) {
   return {
-    title: b.series || b.title, volume: b.series ? b.volume : null, author: b.author,
+    title: b.series || b.title, volume: b.series ? b.volume : null, author: b.author, illustrator: b.illustrator,
     label: labelOf(b), publisher: b.publisher, reading: store.statusOf(b) === 'reading',
+    kind: b.format === 'cbz' ? 'manga' : 'novel', mark: b.imprintMark || '',
   };
 }
 function openShelfItem(it) {
@@ -667,7 +668,7 @@ function renderDetail() {
   const more = b.description && b.description.length > 160 && h('button.link-btn', { type: 'button', onclick: () => { desc.classList.toggle('is-open'); more.textContent = desc.classList.contains('is-open') ? '收起' : '展开全部'; } }, '展开全部');
   const facts = [
     b.illustrator && ['插画', b.illustrator], b.publisher && ['出版社', b.publisher],
-    labelOf(b) && labelOf(b).name !== b.publisher && ['文库', labelOf(b).name], b.published && ['出版时间', fmtPublished(b.published)],
+    labelOf(b) && labelOf(b).name !== b.publisher && [labelOf(b).manga ? '漫画品牌' : '文库', labelOf(b).name], b.published && ['出版时间', fmtPublished(b.published)],
     b.series && ['系列', b.volume != null ? `${b.series} · 第 ${b.volume} 卷` : b.series],
     ['格式', b.format === 'cbz' ? '漫画（CBZ / ZIP）' : 'EPUB'], ['大小', fmtSize(b.size || 0)],
     ['阅读时长', sec ? fmtDuration(sec) : '还没开始'],
@@ -892,7 +893,7 @@ function comboBox(input, search, onPick) {
       type: 'button', role: 'option', tabIndex: -1,
       onpointerdown: (e) => e.preventDefault(), // 不让输入框失去焦点
       onclick: () => pick(i),
-    }, h('span.combo-logo', L.logo ? h('img', { src: logoUrl(L), alt: '' }) : h('span', (L.short || L.name).slice(0, 1))),
+    }, h('span.combo-logo', logoUrl(L) ? h('img', { src: logoUrl(L), alt: '' }) : h('span', (L.short || L.name).slice(0, 1))),
       h('span.combo-text', h('b', L.name), h('small', L.company)))));
   };
   const pick = (i) => { const L = rows[i]; if (!L) return; list.hidden = true; active = -1; if (L.id) onPick(L); else { input.value = L.name; input.dispatchEvent(new Event('input')); } };
@@ -919,9 +920,11 @@ function editBook(id) {
     let imprint = book.imprint || '';
     const spineHost = h('div.spine-prev');
     const drawSpine = () => {
-      const label = labelById(imprint) || matchLabel(publisher.value);
+      const label = labelById(imprint) || matchLabel(publisher.value, book.format === 'cbz');
+      drawMarks(label);
       const sp = buildSpine({
         title: series.value.trim() || title.value.trim(), volume: series.value.trim() ? volume.value : null, author: author.value.trim(),
+        illustrator: illustrator.value.trim(), kind: book.format === 'cbz' ? 'manga' : 'novel', mark,
         label, publisher: publisher.value.trim(),
       });
       const color = prefs.get('spineColors', {})[`${book.id}:${book.coverAt || 0}`];
@@ -932,10 +935,24 @@ function editBook(id) {
       drawPubTag(label);
     };
     const pubTag = h('span.pub-tag');
-    const drawPubTag = (label) => pubTag.replaceChildren(...(label ? [label.logo ? h('img', { src: logoUrl(label), alt: '' }) : '', h('span', `书脊会用「${label.name}」的样式`)] : [h('span', publisher.value.trim() ? '没有对应的文库样式，书脊上只印名字' : '')]));
-    const combo = comboBox(publisher, (text) => searchLabels(text, [...new Set(Object.values(state.books).map((x) => x.publisher).filter(Boolean))]), (label) => {
-      publisher.value = label.short || label.name; imprint = label.id; drawSpine();
+    const drawPubTag = (label) => pubTag.replaceChildren(...(label ? [logoUrl(label, mark) ? h('img', { src: logoUrl(label, mark), alt: '' }) : '', h('span', `书脊会用「${label.name}」的样式`)] : [h('span', publisher.value.trim() ? '没有对应的文库样式，书脊上只印名字' : '')]));
+    const combo = comboBox(publisher, (text) => searchLabels(text, [...new Set(Object.values(state.books).map((x) => x.publisher).filter(Boolean))], 8, book.format === 'cbz'), (label) => {
+      publisher.value = label.short || label.name; imprint = label.id; mark = ''; drawSpine();
     });
+    // 漫画品牌往往有好几个年代的书脊小标，让用户自己挑和手上那本一样的
+    let mark = book.imprintMark || '';
+    const markRow = h('div.mark-pick', { hidden: true, role: 'group', 'aria-label': '书脊小标的版本' });
+    let marksFor = null;
+    function drawMarks(label) {
+      const list = label?.manga ? label.marks : [];
+      markRow.hidden = list.length < 2;
+      if (marksFor === label && markRow.childElementCount) { for (const b of markRow.querySelectorAll('button')) b.classList.toggle('is-on', b.dataset.mark === (mark || list[0])); return; }
+      marksFor = label;
+      markRow.replaceChildren(h('span.field-hint', '小标版本'), ...list.map((m) => h('button' + ((mark || list[0]) === m ? '.is-on' : ''), {
+        type: 'button', 'data-mark': m, title: label.wide[m] ? '官方品牌图' : '旧版书脊小标（低清）',
+        onclick: () => { mark = m; drawSpine(); },
+      }, h('img', { src: logoUrl(label, m), alt: '' }))));
+    }
     publisher.addEventListener('input', () => { imprint = ''; drawSpine(); });
     const description = h('textarea.field.is-area', { value: book.description || '', maxLength: 8000, rows: 5, placeholder: '这本书讲了什么？' });
     const descStatus = h('p.field-hint', { role: 'status' });
@@ -955,7 +972,7 @@ function editBook(id) {
     const series = h('input.field', { type: 'text', value: book.series || '', maxLength: 200, placeholder: '不属于系列就留空', list: 'series-names' });
     const volume = h('input.field', { type: 'number', value: book.volume ?? '', min: 0, step: 'any', placeholder: '例如 3', inputMode: 'decimal' });
     const names = [...new Set(Object.values(state.books).map((b) => b.series).filter(Boolean))];
-    for (const f of [title, author, series, volume]) f.addEventListener('input', drawSpine);
+    for (const f of [title, author, illustrator, series, volume]) f.addEventListener('input', drawSpine);
     queueMicrotask(drawSpine);
     return h('form.dialog-body', {
       onsubmit: async (e) => {
@@ -964,19 +981,19 @@ function editBook(id) {
           title: title.value, author: author.value, illustrator: illustrator.value.trim(), publisher: publisher.value.trim(), status,
           rating, review: review.value.trim(), description: description.value.trim(),
           series: series.value.trim(), volume: volume.value === '' ? null : Number(volume.value),
-          imprint, published: normDate(published.value),
+          imprint, published: normDate(published.value), imprintMark: mark,
         };
         if (await guard(() => store.updateBook(id, patch), '已保存')) { close(); exitSelect(false); renderAll(); }
       },
     },
     h('label.field-label', '书名'), title,
     h('div.field-pair.is-even',
-      h('div', h('label.field-label', '作者'), author),
-      h('div', h('label.field-label', '插画'), illustrator)),
+      h('div', h('label.field-label', book.format === 'cbz' ? '作者 / 原作' : '作者'), author),
+      h('div', h('label.field-label', book.format === 'cbz' ? '作画' : '插画'), illustrator)),
     h('div.field-pair.is-date',
-      h('div', h('label.field-label', '出版社 / 文库'), combo),
+      h('div', h('label.field-label', book.format === 'cbz' ? '出版社 / 漫画品牌' : '出版社 / 文库'), combo),
       h('div', h('label.field-label', '出版时间'), published)),
-    pubTag,
+    pubTag, markRow,
     h('div.label-row', h('label.field-label', '简介'),
       h('button.link-btn', { type: 'button', onclick: () => fillWithAi(description, descStatus, { kind: 'book', title: book.title, author: author.value, illustrator: illustrator.value, publisher: publisher.value, volume: book.volume, existing: book.description }) }, icon('sparkle', 16), '让助手写')),
     description, descStatus,
@@ -988,7 +1005,9 @@ function editBook(id) {
     h('p.field-hint', '填了系列和卷号，书架上会显示成“系列名 + 卷号”，同系列的书会叠在一起并按卷号排序。'),
     h('label.field-label', '书脊'),
     h('div.spine-edit', spineHost,
-      h('p.field-hint', '书脊样式按“出版社 / 文库”自动选：顶上是文库小标，中间是书名、卷号和作者，最下面是文库名。这是软件里的示意，不是真实书脊的复刻。')),
+      h('p.field-hint', book.format === 'cbz'
+        ? '漫画书脊按“出版社 / 漫画品牌”自动选：顶上是品牌小标，中间是书名和卷号，原作和作画不是同一人时分两列写，最下面是出版社。品牌有好几个年代的小标时，可以在上面挑和手上那本一样的。只写 JC、KC 这类缩写不会自动套标志，因为好几个品牌都这么叫。'
+        : '书脊样式按“出版社 / 文库”自动选：顶上是文库小标，中间是书名、卷号和作者，最下面是文库名。这是软件里的示意，不是真实书脊的复刻。')),
     h('label.field-label', '我的评分'), stars,
     h('label.field-label', '书评'), review,
     h('div.dialog-actions',

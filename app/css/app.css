@@ -1238,3 +1238,27 @@ select.field { appearance: auto; }
   .cloud-browser .dialog-actions { flex-wrap: wrap; }
   .cd-count { width: 100%; }
 }
+
+/* ---------- 漫画单行本书脊：白底、封面色色带、彩色大卷号 ---------- */
+.sp.is-manga { --ink-m: color-mix(in srgb, var(--sc) 72%, #141824); background: color-mix(in srgb, var(--sc) 7%, #FBFAF6); color: #1B1F2A; }
+.b3d.is-light .sp.is-manga { --ink-m: color-mix(in srgb, var(--sc) 45%, #141824); }
+.sp.is-manga .sp-in { gap: 1.8cqh; }
+.sp-cap { width: 100%; height: 2.4cqh; background: var(--sc); }
+.sp.is-manga .sp-mark { margin-top: -1.2cqh; background: none; padding: 4cqw 12cqw; height: 10cqh; }
+.sp.is-manga .sp-mark.is-wide { height: 6cqh; padding: 2cqw 6cqw; }
+.sp.is-manga .sp-mark img { mix-blend-mode: multiply; } /* 白底小标和白色书脊融在一起 */
+.sp.is-manga .sp-mark.is-text { color: var(--ink-m); padding: 6cqw 8cqw; }
+.sp.is-manga .sp-title { font-weight: 900; color: #161A24; text-shadow: none; letter-spacing: 0; }
+.sp-vol.is-manga { font-size: 62cqw; font-weight: 900; color: var(--ink-m); letter-spacing: -.05em; }
+.sp-vol.is-manga.is-long { font-size: 40cqw; }
+.sp-creators { display: flex; flex-direction: row-reverse; gap: 4cqw; justify-content: center; font: 700 var(--fs)/1.05 var(--sans); }
+.sp-creator { writing-mode: vertical-rl; text-orientation: mixed; white-space: nowrap; }
+.sp-creator small { font-size: .62em; font-weight: 600; opacity: .75; margin-bottom: .35em; }
+.sp-company.is-manga { font-weight: 700; opacity: .8; max-height: 12cqh; }
+.b3d .sp.is-manga::after { background: linear-gradient(90deg, rgba(0, 0, 0, .14), rgba(255, 255, 255, .25) 30%, rgba(255, 255, 255, .05) 55%, rgba(0, 0, 0, .16)), rgba(10, 12, 20, var(--shade)); }
+
+.mark-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.mark-pick .field-hint { margin: 0 4px 0 0; }
+.mark-pick button { display: grid; place-items: center; width: 64px; height: 40px; padding: 4px; border-radius: 10px; background: #fff; border: 1.5px solid var(--line); }
+.mark-pick button.is-on { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
+.mark-pick img { width: 100%; height: 100%; min-height: 0; object-fit: contain; }

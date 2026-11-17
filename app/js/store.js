@@ -705,6 +705,7 @@ function patchLocal(book, body) {
   if (Number.isInteger(body.rating) && body.rating >= 0 && body.rating <= 5) book.rating = body.rating;
   if (['', 'reading', 'finished'].includes(body.status)) book.status = body.status;
   if (typeof body.imprint === 'string') book.imprint = str(body.imprint, 40);
+  if (typeof body.imprintMark === 'string') book.imprintMark = str(body.imprintMark, 60);
   if (typeof body.published === 'string') book.published = /^\d{4}(-\d{2}(-\d{2})?)?$/.test(body.published.trim()) ? body.published.trim() : '';
   if (typeof body.spineFace === 'string') book.spineFace = body.spineFace;
   if ('volume' in body) book.volume = body.volume === null || body.volume === '' || !Number.isFinite(Number(body.volume)) ? null : Number(body.volume);
@@ -874,7 +875,7 @@ export async function uploadLocalLibrary(onStep) {
       }
       book = (await apiJson('/api/books/' + book.id, 'PATCH', {
         description: b.description || '', status: b.status || '', rating: b.rating || 0, review: b.review || '',
-        imprint: b.imprint || '', published: b.published || '', spineFace: b.spineFace || '',
+        imprint: b.imprint || '', imprintMark: b.imprintMark || '', published: b.published || '',
         collections: (b.collections || []).map((c) => colMap[c]).filter(Boolean),
       })).book;
       idMap[b.id] = book.id;

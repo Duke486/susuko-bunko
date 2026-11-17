@@ -21,7 +21,7 @@ const OPEN_SIGNUP = process.env.OPEN_SIGNUP === '1';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const APP_DIR = path.resolve(process.env.APP_DIR || path.join(__dirname, '..', 'app'));
 const MAX_BOOK_BYTES = Number(process.env.MAX_BOOK_MB || 2048) * 1024 * 1024;
-const VERSION = '0.9.0';
+const VERSION = '0.9.1';
 // 百度网盘开放平台应用（也可以每个账号在设置里自己填）
 const BAIDU_APP_KEY = process.env.BAIDU_APP_KEY || '';
 const BAIDU_SECRET_KEY = process.env.BAIDU_SECRET_KEY || '';
@@ -276,6 +276,7 @@ function patchBook(book, body, lib) {
   if (['', 'reading', 'finished'].includes(body.status)) book.status = body.status; // 空 = 按进度自动判断
   if (typeof body.series === 'string') book.series = str(body.series, 200);
   if (typeof body.imprint === 'string') book.imprint = str(body.imprint, 40);
+  if (typeof body.imprintMark === 'string') book.imprintMark = str(body.imprintMark, 60);
   if (typeof body.published === 'string') book.published = dateOf(body.published);
   if (typeof body.spineFace === 'string') book.spineFace = /^(none|[01](\.\d{1,3})?,[01](\.\d{1,3})?)?$/.test(body.spineFace) ? body.spineFace : '';
   if ('volume' in body) book.volume = volumeOf(body.volume);

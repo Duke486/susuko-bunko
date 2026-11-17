@@ -1,7 +1,8 @@
-// 书脊：照着日本文库本书脊的结构排——顶上文库小标，人物小图，竖排书名，卷号，作者，最下面文库名。
+// 书脊：照着日本文库本书脊的结构排——顶上文库小标，竖排书名，卷号，作者，最下面文库名。
+// 漫画单行本另有一套：白色书脊、顶上一道封面色的色带和品牌小标、大号彩色卷号、“原作 / 作画”两列、最下面出版社名。
 // 文字大小都用书脊自己的宽高（容器单位 cqw / cqh）来算，所以 3D 书架上大小怎么变，比例都一样。
 import { h } from './ui.js';
-import { logoUrl } from './labels.js';
+import { logoUrl, isWideMark } from './labels.js';
 
 export const SPINE_RATIO = 7.1; // 书脊高 ÷ 宽（书 1 : 1.42，厚度是宽的 0.2）
 const H = SPINE_RATIO * 100; // 书脊高度，单位 cqw（宽度的百分之一）
@@ -27,6 +28,7 @@ const fitCol = (len, room, max) => Math.min(max, room / Math.max(1, len * 1.06))
  * 返回 { el }。el 带 .sp 类，外面再决定它是 3D 书的侧面还是预览。
  */
 export function buildSpine(spec, cls = '') {
+  if (spec.kind === 'manga' || spec.label?.manga) return buildMangaSpine(spec, cls);
   const L = spec.label;
   const layout = L?.layout || 'plain';
   const logo = L && logoUrl(L);
@@ -83,4 +85,32 @@ export function fitSpine(el) {
   }
   title.style.setProperty('--fs', `${lo.toFixed(1)}cqw`);
   el.dataset.fitted = '1';
+}
+
+/** 漫画单行本的书脊 */
+function buildMangaSpine(spec, cls) {
+  const L = spec.label;
+  const layout = L?.layout || 'manga';
+  const logo = L && logoUrl(L, spec.mark);
+  const wide = L && isWideMark(L, spec.mark);
+  const v = spec.volume != null && spec.volume !== '' ? String(spec.volume) : '';
+  const first = (t) => (t || '').split(/[、,，]/)[0].trim();
+  const author = first(spec.author), artist = first(spec.illustrator);
+  // 原作和作画是不同的人就排成两列（右边原作、左边作画），否则只写作者
+  const creators = artist && artist !== author ? [['原作', author], ['作画', artist]].filter(([, n]) => n) : author ? [['', author]] : [];
+  const company = L?.company || spec.publisher || '';
+  const brand = L ? L.name.replace(/（.*?）/g, '') : '';
+
+  const cFs = creators.length ? Math.min(...creators.map(([k, n]) => fitCol(vlen(n) + (k ? 2.6 : 0), 150, creators.length > 1 ? 24 : 28))) : 0;
+  const mark = L && (logo
+    ? h('span.sp-mark.is-manga' + (wide ? '.is-wide' : ''), h('img', { src: logo, alt: brand, draggable: false, loading: 'lazy' }))
+    : h('span.sp-mark.is-text.is-manga', { style: `--fs:${fitCol(vlen(brand), 90, 18).toFixed(1)}cqw` }, brand));
+  const title = h('span.sp-title', { style: '--fs:40cqw' }, spec.title || '');
+  const vol = v && h('span.sp-vol.is-manga' + (v.length > 2 ? '.is-long' : ''), v);
+  const people = creators.length > 0 && h('span.sp-creators', { style: `--fs:${cFs.toFixed(1)}cqw` },
+    creators.map(([k, n]) => h('span.sp-creator', k && h('small', k), n)));
+  const bottom = company && h('span.sp-company.is-manga', { style: `--fs:${fitCol(vlen(company), 70, 15).toFixed(1)}cqw` }, company);
+  const parts = [h('span.sp-cap'), mark || h('span.sp-pad'), title, vol, people, h('span.sp-gap'), bottom];
+  const el = h('div.sp.is-manga' + (cls ? '.' + cls : '') + '.is-' + layout, h('div.sp-in', parts.filter(Boolean)), spec.reading && h('span.sp-ribbon'));
+  return { el };
 }

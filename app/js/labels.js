@@ -2,6 +2,8 @@
 // 标志图片只用于在你自己的书架上区分文库；排版是软件里的示意，不是逐版复刻的真实书脊。
 // layout：top = 小标在最上面；gagaga = 小标在上、人物图在作者下面；fantasia = 圆标在书名和作者之间；legacy = 旧版 MF 文库 J
 // mark：square = 方形小标（放在白色标签区里），wide = 横版字标，light = 白色字标（直接印在书脊底色上）
+import { MANGA_LABELS } from './labels-manga.js';
+
 export const LABELS = [
   { id: 'mfj', name: 'MF文庫J', company: 'KADOKAWA', logo: 'mfj', mark: 'square', layout: 'top', aka: ['MF文库J', 'MF Bunko J', 'MF文庫', 'MFJ'] },
   { id: 'mfj-old', name: 'MF文庫J（旧版）', short: 'MF文庫J', company: 'メディアファクトリー', logo: 'mfj-old', mark: 'square', layout: 'legacy', aka: ['MF文库J旧版', 'Media Factory', 'メディアファクトリー'] },
@@ -48,37 +50,46 @@ export const LABELS = [
   { id: 'qingzhi', name: '轻之文库', company: '轻之文库', layout: 'top', aka: ['輕之文庫', '轻文'] },
 ];
 
-const byId = new Map(LABELS.map((l) => [l.id, l]));
+const ALL = [...LABELS, ...MANGA_LABELS];
+const byId = new Map(ALL.map((l) => [l.id, l]));
 const companyCount = new Map();
-for (const l of LABELS) if (l.id !== 'mfj-old') companyCount.set(l.company, (companyCount.get(l.company) || 0) + 1);
+for (const l of ALL) if (l.id !== 'mfj-old') companyCount.set(l.company, (companyCount.get(l.company) || 0) + 1);
+export { MANGA_LABELS };
 export const labelById = (id) => byId.get(id) || null;
-export const logoUrl = (l) => (l?.logo ? `img/labels/${l.logo}.png` : '');
+/** 书脊小标的图片：漫画品牌可以从几个版本里选（mark 为空就用第一个） */
+export function logoUrl(l, mark) {
+  if (!l) return '';
+  if (l.manga) { const m = l.marks.includes(mark) ? mark : l.marks[0]; return m ? `img/manga/${m}.png` : ''; }
+  return l.logo ? `img/labels/${l.logo}.png` : '';
+}
+export const isWideMark = (l, mark) => (l?.manga ? !!l.wide[l.marks.includes(mark) ? mark : l.marks[0]] : l?.mark === 'wide');
 
 // 比较时把简繁、全半角、空格这些差异抹平
 const norm = (s) => String(s || '').normalize('NFKC').toLowerCase().replace(/[\s・·._\-!！'’（）()]/g, '')
   .replace(/库/g, '庫').replace(/击/g, '撃').replace(/馆/g, '館').replace(/讲谈/g, '講談').replace(/东立/g, '東立');
 const keysOf = (l) => [l.name, l.short, l.company, ...l.aka].filter(Boolean).map(norm);
 
-/** 出版社那一栏里写的字 → 最像的文库（找不到就是 null） */
-export function matchLabel(text) {
+/** 出版社那一栏里写的字 → 最像的文库 / 漫画品牌（找不到就是 null）。manga = 先找漫画品牌 */
+export function matchLabel(text, manga = false) {
   const t = norm(text);
   if (!t) return null;
   let best = null, score = 0;
-  for (const l of LABELS) {
+  for (const l of manga ? [...MANGA_LABELS, ...LABELS] : ALL) {
     for (const k of keysOf(l)) {
       const s = k === t ? 100 : (t.includes(k) && k.length >= 3) ? 60 + k.length : 0;
       // 公司名只在没有更具体的文库名时才算数（KADOKAWA 下面有好多文库）
       const adj = k === norm(l.company) && k !== norm(l.name) && (companyCount.get(l.company) || 0) > 1 ? s - 50 : s;
       if (adj > score) { score = adj; best = l; }
+      else if (adj === score && adj > 0 && !!best?.manga !== manga && !!l.manga === manga) best = l; // 同样像时，按书的类型优先
     }
   }
   return score >= 60 ? best : null;
 }
 
 /** 输入框检索：按名字、别名、公司名模糊匹配，返回最多 limit 条 */
-export function searchLabels(text, extra = [], limit = 8) {
+export function searchLabels(text, extra = [], limit = 8, manga = false) {
   const t = norm(text);
-  const rows = LABELS.map((l) => {
+  const rows = ALL.map((l) => {
     const ks = keysOf(l);
     let s = 0;
     if (!t) s = 1;
@@ -87,7 +98,7 @@ export function searchLabels(text, extra = [], limit = 8) {
       else if (k.startsWith(t)) s = Math.max(s, 80);
       else if (k.includes(t)) s = Math.max(s, 60);
     }
-    return { label: l, score: s };
+    return { label: l, score: s ? s + (!!l.manga === manga ? 5 : 0) : 0 }; // 漫画先列漫画品牌，小说先列文库
   }).filter((r) => r.score > 0);
   // 书库里已经在用、但不在内置表里的出版社名也一起给出来
   for (const name of extra) {
@@ -99,4 +110,4 @@ export function searchLabels(text, extra = [], limit = 8) {
 }
 
 /** 一本书该用哪个文库：自己选过的优先，否则按出版社文字猜 */
-export const labelOf = (book) => labelById(book?.imprint) || matchLabel(book?.publisher);
+export const labelOf = (book) => labelById(book?.imprint) || matchLabel(book?.publisher, book?.format === 'cbz');
