@@ -128,6 +128,7 @@ async function api(path, opts = {}, conf = account()) {
   return res;
 }
 export { api as rawApi };
+import * as direct from './cloud-direct.js';
 const apiJson = async (path, method, body, conf) => (await api(path, {
   method, headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
   body: body === undefined ? undefined : JSON.stringify(body),
@@ -521,9 +522,15 @@ class RemoteSource {
 
   async _fetchRun(first, last) {
     const from = first * CHUNK, to = Math.min((last + 1) * CHUNK, this.size) - 1;
-    const res = await api(`/api/books/${this.book.id}/file`, { headers: { Range: `bytes=${from}-${to}` } });
-    const buf = new Uint8Array(await res.arrayBuffer());
-    const base = res.status === 206 ? first : 0; // 服务器若不支持分段，会直接给整本
+    // 网盘里的书：安卓 / Windows 客户端先试设备直连，不行再经服务器转发
+    let buf = this.book.source?.type === 'baidu' ? await direct.directRead(this.book, 'file', from, to, [], this.size) : null;
+    let base = first;
+    if (!buf) {
+      const res = await api(`/api/books/${this.book.id}/file`, { headers: { Range: `bytes=${from}-${to}` } });
+      buf = new Uint8Array(await res.arrayBuffer());
+      base = res.status === 206 ? first : 0; // 服务器若不支持分段，会直接给整本
+      if (this.book.source) direct.setRoute(this.book.id, 'proxy');
+    }
     for (let off = 0, i = base; off < buf.length; off += CHUNK, i++) this.chunks.set(i, buf.subarray(off, off + CHUNK));
     for (const fn of this.watchers) fn(this.progress);
     if (this.chunks.size >= this.count) this._save();
@@ -613,7 +620,13 @@ class PageListSource {
     return this;
   }
   async blobOf(entry) {
+    if (entry.size > 0) {
+      const ahead = this.entries.slice(entry.index + 1, entry.index + 9).map((e) => String(e.index));
+      const bytes = await direct.directRead(this.book, String(entry.index), 0, entry.size - 1, ahead, entry.size);
+      if (bytes) return new Blob([bytes]);
+    }
     const res = await api(`/api/books/${this.book.id}/page/${entry.index}`);
+    direct.setRoute(this.book.id, 'proxy');
     return res.blob();
   }
 }
@@ -621,7 +634,7 @@ class PageListSource {
 /** 打开一本书用的数据源：本机有就用本机的，否则边读边从服务器取（网盘里的书由服务器去网盘取） */
 export async function bookSource(book) {
   const cached = await local.get('files', book.id).catch(() => null);
-  if (cached) return { source: cached, release() {} };
+  if (cached) { if (book.source) direct.setRoute(book.id, 'local'); return { source: cached, release() {} }; }
   if (!account()) throw new Error('这本书的文件不在这台设备上');
   if (book.source?.type === 'baidu-dir') return { source: await new PageListSource(book).load(), release() {} };
   const src = remoteOf(book);
@@ -755,6 +768,20 @@ export async function importBook(file, collectionIds = []) {
 }
 
 // ---------- 百度网盘 ----------
+direct.useApi(apiJson);
+export { direct };
+/** 诊断设备直连：随机跳到书里任意位置，直连读一段，再经服务器读同一段逐字节核对 */
+export async function diagnoseDirect(book, rounds = 12) {
+  const proxyRead = async (key, start, end) => {
+    if (book.source.type === 'baidu') {
+      const res = await api(`/api/books/${book.id}/file`, { headers: { Range: `bytes=${start}-${end}` } });
+      return new Uint8Array(await res.arrayBuffer());
+    }
+    const res = await api(`/api/books/${book.id}/page/${key}`);
+    return new Uint8Array(await res.arrayBuffer()).subarray(start, end + 1);
+  };
+  return direct.diagnose(book, { rounds, proxyRead });
+}
 export const baidu = {
   status: () => apiJson('/api/cloud/baidu'),
   setApp: (appKey, secretKey) => apiJson('/api/cloud/baidu/app', 'PUT', { appKey, secretKey }),

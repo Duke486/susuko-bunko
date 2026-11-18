@@ -27,6 +27,8 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm install
+      - name: 检查百度直连的地址白名单（单元测试）
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib cloud
       - run: npx tauri build
       - uses: actions/upload-artifact@v4
         with:

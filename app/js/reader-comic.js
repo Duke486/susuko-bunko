@@ -1,4 +1,5 @@
 // 漫画阅读器：CBZ / ZIP。翻页（可日漫右翻、宽屏双页）或下拉长条。
+import { routeChip } from './cloud-direct.js';
 import { ZipReader, mimeOf, isImageName } from './zip.js';
 import { prefs, setProgress, natural } from './store.js';
 import { h, icon, toast, menuButton, statusClock } from './ui.js';
@@ -49,7 +50,7 @@ export async function open({ host, book, title = book.title, source, progress, o
     h('footer.reader-foot', clock.el, h('span.foot-chapter', title), footRight),
     h('header.reader-top',
       h('button.icon-btn', { type: 'button', 'aria-label': '返回书架', onclick: onExit }, icon('back')),
-      h('div.reader-heading', h('span.reader-title', title), topSub)),
+      h('div.reader-heading', h('span.reader-title', title), topSub, routeChip(book) || '')),
     h('div.reader-bottom',
       h('div.dock-info', h('span.dock-chapter', '页码'), sliderLabel),
       h('div.bottom-row', slider),

@@ -1,5 +1,6 @@
 // EPUB 阅读器。横排可左右翻页（CSS 多栏分页，宽屏双页）或上下滚动；竖排为从右往左翻页。
 // 长按文字可以选字：复制、划线、批注、查词、翻译、朗读。也可以从当前页开始听书。
+import { routeChip } from './cloud-direct.js';
 import { Epub } from './epub.js';
 import { prefs, setProgress, saveMark, removeMark, marksOf, onChange, touchActivity } from './store.js';
 import { h, icon, toast, dialog, menuButton, imageViewer, statusClock, fmtPercent } from './ui.js';
@@ -77,7 +78,7 @@ export async function open({ host, book, title = book.title, source, progress, o
     h('footer.reader-foot', clock.el, footCenter, footRight),
     h('header.reader-top',
       h('button.icon-btn', { type: 'button', 'aria-label': '返回书架', onclick: onExit }, icon('back')),
-      h('div.reader-heading', h('span.reader-title', title), topSub),
+      h('div.reader-heading', h('span.reader-title', title), topSub, routeChip(book) || ''),
       markBtn,
       h('button.icon-btn', { type: 'button', 'aria-label': '阅读设置', title: '阅读设置', onclick: () => openSheet('type') }, icon('type'))),
     h('div.reader-bottom',

@@ -1274,3 +1274,13 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   padding: 6px 14px; border-radius: 999px; background: rgba(0, 0, 0, .55); color: #fff; font-size: 13px; pointer-events: none;
 }
 .comic-page.is-loading img { opacity: .55; transition: opacity .2s; }
+.route-chip { display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; white-space: nowrap; background: color-mix(in srgb, currentColor 10%, transparent); opacity: .85; }
+.route-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .5; }
+.route-chip[data-route="direct"]::before { background: #23A26D; opacity: 1; }
+.route-chip[data-route="proxy"]::before { background: #E3A52B; opacity: 1; }
+.route-chip[data-route="local"]::before { background: #4C8DF6; opacity: 1; }
+.direct-box { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+.direct-box h3 { font-size: 15px; }
+.direct-run { display: flex; gap: 8px; flex-wrap: wrap; }
+.direct-run select { flex: 1; min-width: 180px; }
+.direct-result p { font-size: 13.5px; line-height: 1.6; }

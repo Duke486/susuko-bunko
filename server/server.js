@@ -21,7 +21,7 @@ const OPEN_SIGNUP = process.env.OPEN_SIGNUP === '1';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const APP_DIR = path.resolve(process.env.APP_DIR || path.join(__dirname, '..', 'app'));
 const MAX_BOOK_BYTES = Number(process.env.MAX_BOOK_MB || 2048) * 1024 * 1024;
-const VERSION = '0.9.2';
+const VERSION = '0.10.0';
 // 百度网盘开放平台应用（也可以每个账号在设置里自己填）
 const BAIDU_APP_KEY = process.env.BAIDU_APP_KEY || '';
 const BAIDU_SECRET_KEY = process.env.BAIDU_SECRET_KEY || '';
@@ -379,6 +379,42 @@ async function baiduPrefetch(lib, fsids) {
   const data = await baiduJson(`${BAIDU_PAN}/rest/2.0/xpan/multimedia?${new URLSearchParams({ method: 'filemetas', access_token: token, fsids: JSON.stringify(need.map(Number)), dlink: '1' })}`);
   for (const f of data.list || []) if (f.dlink) dlinkCache.set(String(f.fs_id), { url: `${f.dlink}&access_token=${encodeURIComponent(token)}`, at: Date.now() });
 }
+// ---------- 设备直连 ----------
+// 安卓 / Windows 客户端可以自己去百度的下载服务器取文件（更快，不走服务器流量）。
+// 百度的 dlink 必须带 access_token 才能下载，所以不能把 dlink 发给客户端。
+// 服务器先带着令牌请求一次 dlink（只取 1 个字节），拿到百度 302 跳转后的 CDN 地址：
+// 那是一个自带签名、会过期的地址，里面没有令牌。只把这个地址发给客户端；如果跳转后的地址里还带着令牌，就拒绝直连、让客户端走转发。
+// 这些地址只放在内存里，不写数据库、不写日志。
+const directCache = new Map(); // fsid → { url, at }
+const DIRECT_TTL = 10 * 60 * 1000; // 发给客户端后按 10 分钟算过期（百度没有公开 CDN 地址的有效期，取保守值）
+const ALLOWED_HOST = process.env.BAIDU_DIRECT_HOST_RE ? new RegExp(process.env.BAIDU_DIRECT_HOST_RE) : /(^|\.)(baidu\.com|baidupcs\.com|bcebos\.com|bdstatic\.com)$/i; // 环境变量只给测试用
+async function baiduDirect(lib, fsid) {
+  const hit = directCache.get(fsid);
+  if (hit && Date.now() - hit.at < DIRECT_TTL / 2) return hit.url;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let url = await baiduDlink(lib, fsid, attempt > 0);
+    let hops = 0, status = 0;
+    for (; hops < 6; hops++) {
+      const r = await baiduFetch(url, { redirect: 'manual', headers: { Range: 'bytes=0-0' } });
+      status = r.status;
+      const loc = r.headers.get('location');
+      await r.body?.cancel().catch(() => {});
+      if (status >= 300 && status < 400 && loc) { url = new URL(loc, url).href; continue; }
+      break;
+    }
+    if (status === 403 || status === 401 || status === 404) continue; // dlink 过期了，重新要一个再试
+    if (status !== 206 && status !== 200) throw new BaiduError(`百度没有给出直连地址（${status}）`, 502, 'no-direct');
+    const u = new URL(url);
+    if (!hops || /access_token=/i.test(u.search) || !ALLOWED_HOST.test(u.hostname)) {
+      throw new BaiduError('这个文件百度没有给出可以安全交给设备的地址，只能经服务器转发', 409, 'no-direct');
+    }
+    directCache.set(fsid, { url, at: Date.now() });
+    if (directCache.size > 3000) directCache.delete(directCache.keys().next().value);
+    return url;
+  }
+  throw new BaiduError('百度拒绝了下载请求', 502, 'no-direct');
+}
+
 /** 把网盘里的文件按需转发给客户端，Range 原样带过去 */
 async function baiduStream(req, res, lib, fsid, name, cacheable = false) {
   const ctrl = new AbortController();
@@ -476,6 +512,26 @@ async function baiduApi(req, res, seg, q, lib) {
     if (seg[0] === 'list' && M === 'GET') {
       const dir = q.get('dir') || '/';
       return json(res, 200, { dir, items: await baiduList(lib, dir) });
+    }
+    if (seg[0] === 'direct' && M === 'POST') { // 给客户端几个短时效的直连地址（整本书一个，图片文件夹每页一个）
+      const body = await readJson(req);
+      const book = lib.books[str(body.bookId, 40)];
+      if (!book?.source) return fail(res, 404, '没有这本书');
+      let targets;
+      if (book.source.type === 'baidu') targets = [{ key: 'file', fsid: book.source.fsid, size: book.size }];
+      else {
+        const pages = lib.cloudPages[book.id] || [];
+        const want = (Array.isArray(body.pages) ? body.pages : []).map(Number).filter((n) => Number.isInteger(n) && pages[n]).slice(0, 12);
+        targets = want.map((n) => ({ key: String(n), fsid: pages[n].fsid, size: pages[n].size }));
+        await baiduPrefetch(lib, targets.map((t) => t.fsid)).catch(() => {});
+      }
+      const items = [];
+      for (const t of targets) {
+        try { items.push({ key: t.key, url: await baiduDirect(lib, t.fsid), size: t.size, ttl: DIRECT_TTL }); }
+        catch (e) { items.push({ key: t.key, error: e.code === 'no-direct' ? 'no-direct' : 'failed', message: e.message }); }
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      return json(res, 200, { items });
     }
     if (seg[0] === 'add' && M === 'POST') { // 把网盘里的文件 / 图片文件夹放上书架（不下载、不占服务器空间）
       const body = await readJson(req, 512 * 1024);

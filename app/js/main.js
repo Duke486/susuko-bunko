@@ -1558,7 +1558,8 @@ function settingsCloud() {
         h('div.cloud-actions',
           h('button.btn.is-primary', { type: 'button', onclick: () => openBaiduBrowser() }, icon('folder', 18), '浏览网盘，添加漫画'),
           h('button.btn', { type: 'button', onclick: async () => { if (await confirmDialog('断开百度网盘', '断开后，书架上网盘里的书会暂时打不开，重新连接同一个账号就能恢复。', { ok: '断开', danger: true })) { await guard(() => store.baidu.disconnect(), '已断开'); draw(); } } }, '断开'),
-          st.ownApp && h('button.btn.is-quiet', { type: 'button', onclick: () => drawApp(st) }, '更换应用')));
+          st.ownApp && h('button.btn.is-quiet', { type: 'button', onclick: () => drawApp(st) }, '更换应用')),
+        directPanel());
       return;
     }
     if (!st.configured) return drawApp(st);
@@ -1620,6 +1621,43 @@ function settingsCloud() {
   draw();
   return card;
 }
+
+/** 设备直连：说明 + 用真实网盘文件做一次检查（随机跳到任意位置读，和服务器转发逐字节核对） */
+function directPanel() {
+  const native = store.direct.nativeAvailable();
+  const books = Object.values(state.books).filter((b) => b.source?.type === 'baidu' || b.source?.type === 'baidu-dir');
+  const box = h('div.direct-box',
+    h('h3', '读取方式'),
+    h('p.set-sub', native
+      ? '这台设备上，网盘里的书优先由设备直接从百度下载（不经过你的服务器，也不占服务器流量）；直连不成功时会自动改走服务器转发。阅读时顶部会显示当前实际的读取方式。百度令牌只保存在服务器上，设备只拿到几分钟内有效的下载地址。'
+      : '网页版不能直接向百度下载（浏览器不允许设置百度要求的请求头，也会被跨域限制挡住），所以始终经你的服务器转发。安卓和 Windows 客户端会优先直连。'));
+  if (!native) return box;
+  if (!books.length) { box.append(h('p.muted', '书架上还没有网盘里的书。添加一本以后，可以在这里检查直连是否可用。')); return box; }
+  const pick = h('select.field', { 'aria-label': '用哪本书检查' }, books.map((b) => h('option', { value: b.id }, store.seriesLabel(b))));
+  const result = h('div.direct-result', { role: 'status' });
+  const run = h('button.btn', { type: 'button', onclick: async () => {
+    const book = state.books[pick.value];
+    run.disabled = true; result.replaceChildren(h('p.muted', '正在检查：直连随机读取 12 段，并经服务器读取同样的段落核对内容…'));
+    try {
+      const r = await store.diagnoseDirect(book, 12);
+      const avg = (a) => (a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : 0);
+      const reasons = Object.entries(r.errors).map(([k, n]) => `${directReason(k)} ×${n}`).join('；');
+      result.replaceChildren(
+        h('p', h('b', r.ok === 12 ? '直连可用' : r.ok > 0 ? '直连部分可用' : '直连不可用，会一直经服务器转发'),
+          `：成功 ${r.ok} / 12，内容不一致 ${r.mismatch}，失败 ${r.fail}`),
+        h('p.muted', `平均耗时：直连 ${avg(r.directMs)} ms，服务器转发 ${avg(r.proxyMs)} ms（每段 256 KB）`),
+        reasons && h('p.muted', `失败原因：${reasons}`));
+    } catch (e) { result.replaceChildren(h('p.form-error', e.message)); }
+    finally { run.disabled = false; }
+  } }, '检查设备直连');
+  box.append(h('div.direct-run', pick, run), result);
+  return box;
+}
+const directReason = (code) => ({
+  host: '百度跳转到了不认识的地址', 'status:403': '百度拒绝了这台设备（可能下载地址和服务器的 IP 绑定）', 'status:401': '百度拒绝了这台设备',
+  'status:200': '百度不支持按段读取', range: '返回的内容和请求的位置对不上', net: '网络连不上百度', timeout: '连接百度超时',
+  'no-direct': '百度没有给出能安全交给设备的地址', failed: '服务器没能拿到直连地址',
+}[code] || code);
 
 const BOOK_RE = /\.(epub|cbz|zip)$/i;
 const IMG_RE = /\.(jpe?g|png|webp|gif|avif|bmp)$/i;
