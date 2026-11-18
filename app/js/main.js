@@ -7,6 +7,7 @@ import * as theme from './theme.js';
 import { mountShelf } from './shelf3d.js';
 import { labelOf, labelById, matchLabel, searchLabels, logoUrl } from './labels.js';
 import { buildSpine, fitSpine } from './spine.js';
+import { mountWinbar } from './winbar.js';
 
 // 0.6 起立体书架是默认的书架视图（旧的“书脊”视图并入了它）
 if (prefs.get('layout') === 'spine' || !prefs.get('layoutV')) { prefs.set('layout', 'shelf'); prefs.set('layoutV', 1); }
@@ -2092,6 +2093,7 @@ window.addEventListener('keydown', (e) => {
   }
 });
 (async () => {
+  mountWinbar();
   await store.init();
   if (!store.hasStarted()) { if (location.hash.startsWith('#/read')) history.replaceState(null, '', '#/'); renderWelcome(); return; }
   startShelf();

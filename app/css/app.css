@@ -1414,3 +1414,56 @@ button.tag-chip:hover { background: color-mix(in srgb, #8B7BD8 22%, transparent)
   .continue-pill { left: auto; width: 60px; }
   .continue-pill .pill-fab { display: grid; }
 }
+
+/* ---------- Windows 客户端自绘标题栏（系统标题栏已关掉） ---------- */
+.winbar { position: fixed; z-index: 500; top: 0; left: 0; right: 0; height: 40px; pointer-events: none; }
+.winbar > * { pointer-events: auto; }
+.win-drag { position: absolute; inset: 0; }
+.win-pin-wrap { position: absolute; left: 14px; top: 4px; }
+.win-pin {
+  position: relative; display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 9px;
+  background: transparent; cursor: pointer; transition: background .15s;
+}
+.win-pin img { width: 20px; height: 20px; border-radius: 5px; pointer-events: none; }
+.win-pin:hover { background: color-mix(in srgb, var(--ink) 8%, transparent); }
+.win-pin.is-on { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.win-pin-dot { /* 置顶时右下角亮一个小点 */
+  position: absolute; right: 3px; bottom: 3px; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 0 2px var(--bg); transform: scale(0); transition: transform .18s cubic-bezier(.2, .8, .2, 1.4);
+}
+.win-pin.is-on .win-pin-dot { transform: scale(1); }
+.win-tip {
+  position: absolute; left: 0; top: 38px; padding: 7px 12px; border-radius: 10px; white-space: nowrap; font-size: 13px; color: var(--ink);
+  background: color-mix(in srgb, var(--surface) 92%, transparent); border: 1px solid var(--glass-line); box-shadow: 0 8px 22px -8px rgba(20, 26, 46, .35);
+  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+  opacity: 0; transform: translateY(-4px); pointer-events: none; transition: opacity .15s, transform .15s;
+}
+.win-pin:hover + .win-tip { opacity: 1; transform: none; transition-delay: .45s; }
+.win-pin.show-tip + .win-tip { opacity: 1; transform: none; transition-delay: 0s; }
+.win-ctrls { position: absolute; top: 0; right: 0; display: flex; }
+.win-btn {
+  display: grid; place-items: center; width: 46px; height: 36px; padding: 0; border: 0; border-radius: 0;
+  background: transparent; color: var(--ink); transition: background .12s, color .12s;
+}
+.win-btn:hover { background: color-mix(in srgb, var(--ink) 9%, transparent); }
+.win-btn:active { background: color-mix(in srgb, var(--ink) 15%, transparent); }
+.win-btn.is-close:hover { background: #C42B1C; color: #fff; }
+.win-btn.is-close:active { background: #C8473A; color: #fff; }
+.win-ctrls .win-btn:last-child { border-top-right-radius: 8px; }
+html.is-maximized .win-ctrls .win-btn:last-child { border-radius: 0; }
+
+/* 让出最上面一条给标题栏：侧栏的收起按钮和右上角三个按钮在同一行 */
+html.is-desk .side { padding-top: 0; }
+html.is-desk .side-top { height: 40px; align-items: center; margin-bottom: -6px; position: relative; z-index: 501; pointer-events: none; }
+html.is-desk .side-top > * { pointer-events: auto; }
+html.is-desk .main { margin-top: 40px; }
+html.is-desk .shell.is-mini .side-top { margin-top: 40px; }
+@media (max-width: 760px) {
+  html.is-desk .side { padding-top: 48px; }
+  html.is-desk .topbar { padding-top: 10px; }
+}
+@media (max-width: 920px) { html.is-desk .reader-top { top: 46px; } }
+/* 阅读时标题栏淡出，鼠标移到最上面才出现；拖动区只留很窄一条，免得挡住翻页 */
+#reader:not([hidden]) ~ .winbar :is(.win-ctrls, .win-pin-wrap) { opacity: 0; transition: opacity .2s; }
+#reader:not([hidden]) ~ .winbar:hover :is(.win-ctrls, .win-pin-wrap) { opacity: 1; }
+#reader:not([hidden]) ~ .winbar .win-drag { height: 10px; }
