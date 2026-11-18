@@ -4,7 +4,7 @@ import { ZipReader, mimeOf, isImageName } from './zip.js';
 import { prefs, setProgress, natural } from './store.js';
 import { h, icon, toast, menuButton, statusClock } from './ui.js';
 
-const DEFAULTS = { mode: 'page', rtl: true, spread: true };
+const DEFAULTS = { mode: 'page', rtl: true, spread: true, turn: 'slide', zoom: true, pageNum: true, applyAll: true };
 
 export async function open({ host, book, title = book.title, source, progress, onExit }) {
   // 网盘里的图片文件夹本身就是一页一张图；压缩包则从里面挑出图片
@@ -15,7 +15,9 @@ export async function open({ host, book, title = book.title, source, progress, o
   // 本机文件读得快，预读两页就够；从服务器或网盘取的要多预读几页，翻页时才不用等
   const remote = !(source instanceof Blob);
   const AHEAD = remote ? 5 : 2;
-  const settings = { ...DEFAULTS, ...prefs.get('comic', {}) };
+  // 阅读方式可以只对这一本生效（比如某本是条漫就用下拉，其余还是日漫翻页）
+  const own = prefs.get('comicBooks', {})[book.id];
+  const settings = { ...DEFAULTS, ...prefs.get('comic', {}), ...(own || {}), applyAll: !own };
   let page = Math.min(total - 1, Math.max(0, Number(progress?.loc?.page) || 0));
   let destroyed = false, cleanupView = () => {};
 
@@ -75,12 +77,20 @@ export async function open({ host, book, title = book.title, source, progress, o
   }
 
   // ---------- 翻页模式 ----------
+  // 三块面板并排：上一页 | 当前页 | 下一页。手指拖动时整条跟着走，松手后滑到位再换内容，
+  // 所以翻页是真正“拉过来”的一页，而不是旧页消失再淡入新页。
   function mountPaged(save) {
-    const holder = h('div.comic-page');
+    const cur = h('div.comic-page');
+    const sideA = h('div.comic-page.is-side'), sideB = h('div.comic-page.is-side');
+    const track = h('div.comic-track', sideA, cur, sideB);
     const touch = h('div.reader-touch');
-    stage.replaceChildren(holder, touch);
-    let token = 0, shown = -1;
+    stage.replaceChildren(track, touch);
+    let token = 0, shown = -1, busy = false;
     const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const nextSide = () => (settings.rtl ? -1 : 1); // 下一页在屏幕哪一侧：日漫在左边
+    const panelFor = (dir) => (dir * nextSide() > 0 ? sideB : sideA); // dir: +1 下一页，-1 上一页
+    const place = () => { sideA.style.transform = 'translateX(calc(-100% - 24px))'; sideB.style.transform = 'translateX(calc(100% + 24px))'; };
+    place();
 
     const spread = () => settings.spread && stage.clientWidth > stage.clientHeight * 1.15;
     function group(p) { // 当前画面显示哪几页：封面单独一页，其后两两成对
@@ -88,66 +98,163 @@ export async function open({ host, book, title = book.title, source, progress, o
       const first = p % 2 ? p : p - 1;
       return first + 1 < total ? [first, first + 1] : [first];
     }
+    const targetOf = (dir) => {
+      const g = group(page);
+      if (dir > 0) return g[g.length - 1] + 1 < total ? g[g.length - 1] + 1 : null;
+      return g[0] > 0 ? group(g[0] - 1)[0] : null;
+    };
+    async function fillPanel(panel, p) {
+      const g = group(p);
+      panel.dataset.page = String(g[0]);
+      const srcs = await Promise.all(g.map(urlOf)).catch(() => null);
+      if (!srcs || panel.dataset.page !== String(g[0])) return false;
+      const imgs = srcs.map((src, n) => h('img', { src, alt: `第 ${g[n] + 1} 页`, draggable: false }));
+      await Promise.all(imgs.map((im) => im.decode().catch(() => {}))); // 先在后台解码，滑过来时不会顿
+      if (panel.dataset.page !== String(g[0])) return false;
+      panel.classList.toggle('is-rtl', settings.rtl);
+      panel.replaceChildren(...imgs);
+      return true;
+    }
+    function prepareSides() {
+      for (const dir of [1, -1]) {
+        const t = targetOf(dir), panel = panelFor(dir);
+        if (t == null) { panel.replaceChildren(); panel.dataset.page = ''; continue; }
+        if (panel.dataset.page !== String(group(t)[0])) { panel.replaceChildren(); fillPanel(panel, t); }
+      }
+    }
     async function render(saveNow = true) {
       const t = ++token;
       const g = group(page);
       page = g[0];
       for (let i = g[g.length - 1] + 1; i <= Math.min(total - 1, g[g.length - 1] + AHEAD); i++) urlOf(i); // 先把后面几页排上队
-      // 这一页还没取到时，过一小会儿显示“正在加载”，不让画面看起来卡住
-      const wait = setTimeout(() => { if (t === token) holder.classList.add('is-loading'); }, 150);
-      const srcs = await Promise.all(g.map(urlOf)).catch(() => null);
-      if (t !== token || destroyed) { clearTimeout(wait); return; }
-      if (!srcs) { clearTimeout(wait); holder.classList.remove('is-loading'); toast('这一页读不出来，可能是网络断了', { error: true }); return; }
-      const imgs = srcs.map((src, n) => h('img', { src, alt: `第 ${g[n] + 1} 页`, draggable: false }));
-      await Promise.all(imgs.map((im) => im.decode().catch(() => {}))); // 先在后台解码好大图，换页时就不会顿一下
-      clearTimeout(wait);
-      if (t !== token || destroyed) return;
-      holder.classList.remove('is-loading');
-      holder.classList.toggle('is-rtl', settings.rtl);
-      holder.replaceChildren(...imgs);
-      const turn = prefs.get('reader', {}).turn || 'slide'; // 和小说共用“翻页动画”设置
-      if (shown >= 0 && shown !== page && !calm && turn !== 'none') {
-        const from = (page > shown ? 1 : -1) * (settings.rtl ? -1 : 1); // 新的一页从哪一侧进来
-        holder.animate([{ opacity: 0.2, transform: `translateX(${turn === 'slide' ? from * 9 : 0}%)` }, { opacity: 1, transform: 'none' }], { duration: 220, easing: 'ease-out' });
+      report(g[g.length - 1], saveNow);
+      if (cur.dataset.page !== String(page) || !cur.childElementCount) {
+        // 这一页还没取到时，过一小会儿显示“正在加载”，不让画面看起来卡住
+        const wait = setTimeout(() => { if (t === token) cur.classList.add('is-loading'); }, 150);
+        const ok = await fillPanel(cur, page);
+        clearTimeout(wait);
+        if (t !== token || destroyed) return;
+        cur.classList.remove('is-loading');
+        if (!ok) { toast('这一页读不出来，可能是网络断了', { error: true }); return; }
+        const turn = settings.turn;
+        if (shown >= 0 && shown !== page && !calm && turn === 'fade') cur.animate([{ opacity: 0.2 }, { opacity: 1 }], { duration: 200, easing: 'ease-out' });
       }
       shown = page;
-      report(g[g.length - 1], saveNow);
-      const last = g[g.length - 1];
+      resetZoom();
+      prepareSides();
       if (g[0] > 0) urlOf(g[0] - 1); // 往回翻一页也常见
       evict(page, AHEAD + 6);
     }
-    function next() {
-      const g = group(page);
-      if (g[g.length - 1] >= total - 1) { toast('已经是最后一页了'); return; }
-      page = g[g.length - 1] + 1; render();
+    // 滑到相邻那一页：from 是松手时已经拖出去的距离（像素）
+    async function turn(dir, from = 0) {
+      const target = targetOf(dir);
+      if (target == null) {
+        if (from) track.animate([{ transform: `translateX(${from}px)` }, { transform: 'none' }], { duration: 220, easing: 'ease-out' });
+        toast(dir > 0 ? '已经是最后一页了' : '已经是第一页了');
+        return;
+      }
+      if (busy) return;
+      const W = stage.clientWidth + 24;
+      const panel = panelFor(dir);
+      if (settings.turn === 'slide' && !calm) {
+        busy = true;
+        const to = -dir * nextSide() * W;
+        const left = Math.abs(to - from) / W;
+        await track.animate([{ transform: `translateX(${from}px)` }, { transform: `translateX(${to}px)` }],
+          { duration: Math.max(140, 300 * left), easing: 'cubic-bezier(.2,.7,.25,1)' }).finished.catch(() => {});
+        busy = false;
+        if (destroyed) return;
+        // 滑到位后：把旁边面板里已经画好的页搬到中间，再把整条移回原位，画面不会闪
+        if (panel.dataset.page === String(group(target)[0]) && panel.childElementCount) {
+          cur.replaceChildren(...panel.children); cur.dataset.page = panel.dataset.page; cur.classList.toggle('is-rtl', settings.rtl);
+          panel.dataset.page = '';
+        }
+      }
+      track.style.transform = '';
+      page = target;
+      render();
     }
-    function prev() { if (page > 0) { page -= 1; render(); } }
-    const leftward = () => (settings.rtl ? next() : prev());
-    const rightward = () => (settings.rtl ? prev() : next());
+    const next = () => turn(1);
+    const prev = () => turn(-1);
+    const leftward = () => turn(-nextSide());
+    const rightward = () => turn(nextSide());
 
-    let down = null;
-    touch.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY }; });
-    touch.addEventListener('pointerup', (e) => {
+    // ---- 双击放大 ----
+    let zoom = { s: 1, x: 0, y: 0 };
+    function applyZoom(animated) {
+      const tf = zoom.s === 1 ? '' : `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.s})`;
+      if (animated) cur.animate([{ transform: cur.style.transform || 'none' }, { transform: tf || 'none' }], { duration: 200, easing: 'ease-out' });
+      cur.style.transform = tf;
+      root.classList.toggle('is-zoomed', zoom.s > 1);
+    }
+    function resetZoom(animated = false) { if (zoom.s !== 1) { zoom = { s: 1, x: 0, y: 0 }; applyZoom(animated); } }
+    function clampZoom() {
+      const mx = (stage.clientWidth * (zoom.s - 1)) / 2, my = (stage.clientHeight * (zoom.s - 1)) / 2;
+      zoom.x = Math.max(-mx, Math.min(mx, zoom.x)); zoom.y = Math.max(-my, Math.min(my, zoom.y));
+    }
+    function toggleZoom(cx, cy) {
+      if (zoom.s > 1) { resetZoom(true); return; }
+      const r = stage.getBoundingClientRect();
+      zoom.s = 2.2;
+      zoom.x = (r.width / 2 - (cx - r.left)) * (zoom.s - 1); zoom.y = (r.height / 2 - (cy - r.top)) * (zoom.s - 1); // 点哪里就放大哪里
+      clampZoom(); applyZoom(true);
+    }
+
+    // ---- 手势：拖动翻页 / 放大后拖动查看 / 点按 ----
+    let down = null, tapTimer = null, lastTap = 0;
+    touch.addEventListener('pointerdown', (e) => {
+      if (busy) return;
+      down = { x: e.clientX, y: e.clientY, zx: zoom.x, zy: zoom.y, dragging: false, t: performance.now() };
+      touch.setPointerCapture?.(e.pointerId);
+      if (zoom.s === 1) prepareSides();
+    });
+    touch.addEventListener('pointermove', (e) => {
       if (!down) return;
       const dx = e.clientX - down.x, dy = e.clientY - down.y;
-      down = null;
-      if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy) * 1.5) {
-        toggleChrome(false);
-        // 手指往哪边拖，就把那一侧的反方向页面拉进来
-        if (dx > 0) leftward(); else rightward();
+      if (zoom.s > 1) { zoom.x = down.zx + dx; zoom.y = down.zy + dy; clampZoom(); applyZoom(false); down.dragging = Math.abs(dx) + Math.abs(dy) > 6; return; }
+      if (!down.dragging && Math.abs(dx) > 8 && Math.abs(dx) > Math.abs(dy)) { down.dragging = true; toggleChrome(false); }
+      if (down.dragging && settings.turn === 'slide' && !calm) {
+        // 拖到没有页的一侧时加阻尼，提示到头了
+        const dir = -Math.sign(dx) * nextSide();
+        const edge = targetOf(dir) == null;
+        track.style.transform = `translateX(${edge ? dx * 0.25 : dx}px)`;
+      }
+    });
+    const end = (e) => {
+      if (!down) return;
+      const dx = e.clientX - down.x, dy = e.clientY - down.y, dt = performance.now() - down.t;
+      const d = down; down = null;
+      if (zoom.s > 1) { if (!d.dragging) tap(e); return; }
+      if (d.dragging) {
+        const fast = Math.abs(dx) / Math.max(1, dt) > 0.45; // 甩一下也算
+        if (Math.abs(dx) > stage.clientWidth * 0.18 || (fast && Math.abs(dx) > 30)) turn(-Math.sign(dx) * nextSide(), settings.turn === 'slide' ? dx : 0);
+        else if (settings.turn === 'slide') track.animate([{ transform: `translateX(${dx}px)` }, { transform: 'none' }], { duration: 200, easing: 'ease-out' }).finished.then(() => { track.style.transform = ''; }).catch(() => {});
+        track.style.transform = '';
         return;
       }
       if (Math.abs(dx) + Math.abs(dy) > 12) return;
-      if (chromeOpen()) { toggleChrome(false); return; }
-      const rect = touch.getBoundingClientRect();
-      const x = (e.clientX - rect.left) / rect.width;
-      if (x < 0.3) leftward(); else if (x > 0.7) rightward(); else toggleChrome(true);
-    });
+      tap(e);
+    };
+    touch.addEventListener('pointerup', end);
+    touch.addEventListener('pointercancel', () => { down = null; track.style.transform = ''; });
+    function tap(e) {
+      const now = performance.now();
+      if (settings.zoom && now - lastTap < 280) { clearTimeout(tapTimer); lastTap = 0; toggleZoom(e.clientX, e.clientY); return; }
+      lastTap = now;
+      const act = () => {
+        if (zoom.s > 1) return; // 放大时单击不翻页，免得看细节时误翻
+        if (chromeOpen()) { toggleChrome(false); return; }
+        const rect = touch.getBoundingClientRect();
+        const x = (e.clientX - rect.left) / rect.width;
+        if (x < 0.3) leftward(); else if (x > 0.7) rightward(); else toggleChrome(true);
+      };
+      if (settings.zoom) tapTimer = setTimeout(act, 260); else act(); // 开了双击放大，单击要稍等一下看是不是双击
+    }
     let lastWheel = 0;
     touch.addEventListener('wheel', (e) => {
       e.preventDefault();
       const now = Date.now();
-      if (now - lastWheel < 220 || Math.abs(e.deltaY) < 4) return;
+      if (now - lastWheel < 260 || Math.abs(e.deltaY) < 4) return;
       lastWheel = now;
       if (e.deltaY > 0) next(); else prev();
     }, { passive: false });
@@ -161,10 +268,10 @@ export async function open({ host, book, title = book.title, source, progress, o
       return true;
     };
     let wasSpread = spread();
-    const observer = new ResizeObserver(() => { if (spread() !== wasSpread) { wasSpread = spread(); render(false); } });
+    const observer = new ResizeObserver(() => { if (spread() !== wasSpread) { wasSpread = spread(); cur.dataset.page = ''; sideA.dataset.page = ''; sideB.dataset.page = ''; render(false); } });
     observer.observe(stage);
     render(save);
-    return { goto: (p) => { page = p; render(); }, onKey, cleanup: () => observer.disconnect() };
+    return { goto: (p) => { page = p; render(); }, onKey, cleanup: () => { observer.disconnect(); clearTimeout(tapTimer); root.classList.remove('is-zoomed'); } };
   }
 
   // ---------- 下拉模式 ----------
@@ -252,7 +359,14 @@ export async function open({ host, book, title = book.title, source, progress, o
 
   function change(patch) {
     Object.assign(settings, patch);
-    prefs.set('comic', settings);
+    const { applyAll, ...rest } = settings;
+    const books = { ...prefs.get('comicBooks', {}) };
+    if (applyAll) { prefs.set('comic', rest); delete books[book.id]; }
+    else books[book.id] = { mode: rest.mode, rtl: rest.rtl }; // 只对这本：只记阅读方式，其他设置仍然全局
+    prefs.set('comicBooks', books);
+    if (!applyAll) prefs.set('comic', { ...prefs.get('comic', {}), turn: rest.turn, zoom: rest.zoom, pageNum: rest.pageNum, spread: rest.spread });
+    root.classList.toggle('no-pagenum', !settings.pageNum);
+    if ('turn' in patch || 'zoom' in patch || 'pageNum' in patch || 'applyAll' in patch) { drawSheet(); return; }
     mount(); drawSheet(); drawModeBtn();
   }
   function drawSheet() {
@@ -260,17 +374,32 @@ export async function open({ host, book, title = book.title, source, progress, o
       h('div.segmented', { role: 'group', 'aria-label': label }, options.map(([value, text]) => h('button' + (settings[key] === value ? '.is-on' : ''), {
         type: 'button', onclick: () => change({ [key]: value }),
       }, text))));
-    const rows = [seg('阅读方式', 'mode', [['page', '翻页'], ['scroll', '下拉']])];
+    const modeNow = settings.mode === 'scroll' ? 'scroll' : settings.rtl ? 'rtl' : 'ltr';
+    const modeCard = (key, ic, label, patch) => h('button.mode-card' + (modeNow === key ? '.is-on' : ''), {
+      type: 'button', 'aria-pressed': String(modeNow === key), onclick: () => change(patch),
+    }, icon(ic, 22), h('span', label));
+    const toggleRow = (label, key, sub) => h('label.sheet-row.is-toggle', h('span.sheet-label', label, sub && h('small', sub)),
+      h('input.switch', { type: 'checkbox', checked: !!settings[key], onchange: (e) => change({ [key]: e.target.checked }) }));
+    const rows = [
+      h('div.sheet-row.is-modes', h('span.sheet-label', '阅读模式'),
+        h('div.mode-cards', modeCard('ltr', 'next', '普通模式', { mode: 'page', rtl: false }),
+          modeCard('rtl', 'prev', '日漫模式', { mode: 'page', rtl: true }),
+          modeCard('scroll', 'scroll', '滚动模式', { mode: 'scroll' }))),
+      toggleRow('阅读模式对所有漫画生效', 'applyAll', '关掉后，上面的阅读模式只对这一本生效'),
+    ];
     if (settings.mode === 'page') {
-      rows.push(seg('翻页方向', 'rtl', [[true, '从右到左（日漫）'], [false, '从左到右']]),
-        seg('宽屏双页', 'spread', [[true, '开'], [false, '关']]));
+      rows.push(seg('翻页动画', 'turn', [['slide', '左右滑动'], ['fade', '淡入'], ['none', '无']]),
+        seg('宽屏双页', 'spread', [[true, '开'], [false, '关']]),
+        toggleRow('允许双击放大画面', 'zoom', '放大后拖动查看细节，再双击还原'));
     }
+    rows.push(toggleRow('显示页码', 'pageNum'));
     sheet.replaceChildren(
       h('div.sheet-head', h('h2', '阅读设置'),
         h('button.icon-btn', { type: 'button', 'aria-label': '关闭', onclick: closePanels }, icon('close'))),
       h('div.sheet-body', rows));
   }
 
+  root.classList.toggle('no-pagenum', !settings.pageNum);
   mount(false);
 
   return {

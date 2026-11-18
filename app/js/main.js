@@ -141,7 +141,20 @@ async function afterSignIn() {
 let els = null;
 const coverCache = new Map(); // 已解析好的封面地址，避免重绘闪烁
 const isSeries = (filter) => filter.startsWith('series:');
-const PAGES = ['stats', 'excerpts', 'settings'];
+const isTag = (filter) => filter.startsWith('tag:');
+const PAGES = ['stats', 'excerpts', 'settings', 'tags'];
+/** 所有标签和用到它的书的数量（同系列多卷只算一次，免得一套 30 卷的书把标签数撑得很大） */
+function allTags() {
+  const count = new Map();
+  for (const b of Object.values(state.books)) for (const t of new Set(b.tags || [])) {
+    const key = `${t}\u0000${b.series || b.id}`;
+    if (count.has(key)) continue;
+    count.set(key, 1);
+  }
+  const out = new Map();
+  for (const key of count.keys()) { const t = key.split('\u0000')[0]; out.set(t, (out.get(t) || 0) + 1); }
+  return [...out].sort((a, b) => b[1] - a[1] || store.natural(a[0], b[0]));
+}
 const isPage = (filter) => PAGES.includes(filter);
 
 function booksIn(filter) {
@@ -151,11 +164,13 @@ function booksIn(filter) {
   if (filter === 'none') return all.filter((b) => !b.collections.length);
   if (isPage(filter)) return [];
   if (isSeries(filter)) return all.filter((b) => b.series === filter.slice(7));
+  if (isTag(filter)) return all.filter((b) => (b.tags || []).includes(filter.slice(4)));
   return all.filter((b) => b.collections.includes(filter));
 }
 function filterName(filter) {
   if (isSeries(filter)) return filter.slice(7);
-  return { all: '全部', reading: '在读', finished: '已读完', none: '未分类', stats: '阅读统计', excerpts: '摘录与批注', settings: '设置' }[filter]
+  if (isTag(filter)) return '#' + filter.slice(4);
+  return { all: '全部', reading: '在读', finished: '已读完', none: '未分类', stats: '阅读统计', excerpts: '摘录与批注', settings: '设置', tags: '标签' }[filter]
     || state.collections[filter]?.name || '全部';
 }
 function openSeries(name) {
@@ -230,12 +245,13 @@ function renderShelf() {
 function renderAll() {
   if (!els) return;
   if (isSeries(view.filter)) { if (!booksIn(view.filter).length) view.filter = view.back || 'all'; }
+  else if (isTag(view.filter)) { if (!booksIn(view.filter).length) view.filter = 'all'; } // 标签下没有书了就回到全部
   else if (!['all', 'reading', 'finished', 'none', ...PAGES].includes(view.filter) && !state.collections[view.filter]) view.filter = 'all';
   if (view.detail && !state.books[view.detail]) view.detail = null;
   renderNav(); renderMe(); renderHeading(); renderTools(); renderIntro(); renderBody(); renderBar(); renderPill(); renderDetail();
 }
 
-const NAV_COLORS = { all: '#3B82F6', reading: '#F59E0B', finished: '#10B981', none: '#8B5CF6', collection: '#EAB308', excerpts: '#14B8A6', stats: '#EC4899', settings: '#64748B' };
+const NAV_COLORS = { all: '#3B82F6', reading: '#F59E0B', finished: '#10B981', none: '#8B5CF6', collection: '#EAB308', excerpts: '#14B8A6', stats: '#EC4899', settings: '#64748B', tag: '#8B7BD8' };
 function renderNav() {
   const active = isSeries(view.filter) ? view.back || 'all' : view.filter;
   const item = (filter, iconName, label, color, count) => h('button.nav-item' + (active === filter ? '.is-active' : ''), {
@@ -251,12 +267,24 @@ function renderNav() {
       h('button.icon-btn.is-small', { type: 'button', 'aria-label': '新建合集', title: '新建合集', onclick: newCollection }, icon('plus', 16))),
     ...store.sortedCollections().map((c) => item(c.id, 'folder', c.name, NAV_COLORS.collection, booksIn(c.id).length)),
     h('button.nav-item.is-new', { type: 'button', onclick: newCollection }, icon('plus', 18), h('span.nav-label', '新建合集')),
+    ...navTags(item),
     h('div.nav-section', h('span', '记录')),
     item('excerpts', 'quote', '摘录与批注', NAV_COLORS.excerpts, markCount || null),
     item('stats', 'chart', '阅读统计', NAV_COLORS.stats),
     item('settings', 'gear', '设置', NAV_COLORS.settings),
   );
   requestAnimationFrame(() => els.nav.querySelector('.is-active')?.scrollIntoView({ inline: 'nearest', block: 'nearest' }));
+}
+
+function navTags(item) {
+  const tags = allTags();
+  if (!tags.length) return [];
+  const shown = tags.slice(0, 8);
+  return [
+    h('div.nav-section', h('span', '标签')),
+    ...shown.map(([t, n]) => item('tag:' + t, 'tag', t, NAV_COLORS.tag || '#8B7BD8', n)),
+    tags.length > shown.length && item('tags', 'tag', `全部标签（${tags.length}）`, NAV_COLORS.tag || '#8B7BD8'),
+  ].filter(Boolean);
 }
 
 function renderMe() {
@@ -368,24 +396,34 @@ async function fillWithAi(area, status, facts) {
 
 function renderBody() {
   const f = view.filter;
-  const shelfNow = !isPage(f) && view.layout === 'shelf' && !view.selecting && visibleBooks().length > 0;
+  const shelfNow = !isPage(f) && view.layout === 'shelf' && !view.selecting && !view.query && visibleBooks().length > 0;
   els.main.classList.toggle('is-shelf', shelfNow);
   if (els.shelf && !shelfNow) { els.shelf.api.destroy(); els.shelf = null; }
   els.body.className = 'body';
   if (f === 'stats') return renderStats();
   if (f === 'excerpts') return renderExcerpts();
   if (f === 'settings') return renderSettings();
+  if (f === 'tags') return renderTagCloud();
   const list = visibleBooks();
   if (!list.length) return renderEmpty();
   if (view.layout === 'list') return renderList(list);
-  if (view.layout === 'shelf' && !view.selecting) return renderShelf3d(list);
-  return renderGrid(list);
+  if (view.layout === 'shelf' && !view.selecting && !view.query) return renderShelf3d(list);
+  return renderGrid(list); // 搜索结果用宫格，一眼能看到更多
+}
+function renderTagCloud() {
+  const tags = allTags();
+  els.body.className = 'body tag-page';
+  els.body.replaceChildren(tags.length
+    ? h('div.tag-cloud', tags.map(([t, n]) => h('button.tag-chip.is-big', { type: 'button', onclick: () => setFilter('tag:' + t) }, '#' + t, h('small', String(n)))))
+    : h('p.muted', '还没有标签。在书的“编辑信息”里可以加，自动查资料时也会带上 Bangumi 上的常用标签。'));
 }
 
 function visibleBooks() {
   let list = booksIn(view.filter);
   if (view.query) {
-    list = list.filter((b) => [b.title, b.author, b.illustrator, b.publisher, b.series].filter(Boolean).join(' ').toLowerCase().includes(view.query));
+    const q = view.query;
+    if (q.startsWith('#') && q.length > 1) list = list.filter((b) => (b.tags || []).some((t) => t.toLowerCase().includes(q.slice(1))));
+    else list = list.filter((b) => [b.title, b.originalTitle, b.author, b.illustrator, b.publisher, b.series, ...(b.tags || [])].filter(Boolean).join(' ').toLowerCase().includes(q));
   }
   const readAt = (b) => state.progress[b.id]?.updatedAt || 0;
   if (isSeries(view.filter)) list.sort(byVolume);
@@ -691,6 +729,8 @@ function renderDetail() {
         h('button.btn.is-primary.is-grow', { type: 'button', onclick: () => openBook(b.id) }, icon('dict', 18), p > 0 ? '继续阅读' : '开始阅读'),
         h('button.btn', { type: 'button', onclick: () => editBook(b.id) }, '编辑信息')),
       h('section.detail-sec', h('h3', '简介'), desc, more),
+      (b.tags || []).length > 0 && h('section.detail-sec', h('h3', '标签'),
+        h('div.tag-row', b.tags.map((t) => h('button.tag-chip', { type: 'button', title: `看看所有 #${t} 的书`, onclick: () => setFilter('tag:' + t) }, '#' + t)))),
       b.review && h('section.detail-sec', h('h3', '我的书评'), h('p.detail-review', b.review)),
       marks.length > 0 && h('section.detail-sec',
         h('button.detail-link', { type: 'button', onclick: () => { view.excerptBook = b.id; setFilter('excerpts'); } },
@@ -876,6 +916,90 @@ async function deleteBooks(ids) {
   if (ok) exitSelect();
 }
 
+/** 自动查资料：搜索 → 显示候选（带推荐）→ 选一个、勾要填的字段 → 返回给编辑表单 */
+function lookupMeta(seed) {
+  if (!store.isConfigured()) { toast('自动查资料要经过你的服务器，请先登录账号', { error: true }); return Promise.resolve(null); }
+  return dialog('自动查资料', (close) => {
+    const q = h('input.field', { type: 'search', value: seed.query, placeholder: '书名、俗称都行，例如：赛勃鹏客', 'aria-label': '要查的名字' });
+    let kind = seed.kind;
+    const kindSeg = h('div.segmented', { role: 'group', 'aria-label': '类型' }, [['novel', '轻小说'], ['manga', '漫画']].map(([v, t]) => h('button' + (kind === v ? '.is-on' : ''), {
+      type: 'button', onclick: (e) => { kind = v; for (const b of e.currentTarget.parentElement.children) b.classList.toggle('is-on', b === e.currentTarget); },
+    }, t)));
+    const steps = h('ul.meta-steps', { role: 'status' });
+    const list = h('div.meta-list');
+    const detail = h('div.meta-pick');
+    const go = h('button.btn.is-primary', { type: 'submit' }, '查找');
+    async function run() {
+      go.disabled = true; list.replaceChildren(); detail.replaceChildren();
+      steps.replaceChildren(h('li', '正在查找…（名字不标准时会先上网确认，可能要十几秒）'));
+      const m = metaSettings(), a = ai.aiSettings();
+      const judge = m.judge === 'custom' ? (m.base && { url: m.base.replace(/\/+$/, '') + '/chat/completions', key: m.key, model: m.model })
+        : m.judge === 'assistant' && ai.aiReady() ? { url: a.base.replace(/\/+$/, '') + '/chat/completions', key: a.key, model: a.model } : null;
+      try {
+        const r = await store.metaLookup({ query: q.value.trim(), kind, author: seed.author, bangumiToken: m.bangumiToken, dsKey: m.dsKey, ai: judge || undefined });
+        steps.replaceChildren(...r.steps.map((t) => h('li', t)));
+        if (!r.candidates.length) { list.replaceChildren(h('p.muted', '没有找到。换个名字试试，或者在设置里填上 DeepSeek 搜索的 Key 让它先上网确认正式名字。')); return; }
+        list.replaceChildren(...r.candidates.map((c, i) => h('button.meta-cand' + (i === r.pick ? '.is-pick' : ''), { type: 'button', onclick: () => choose(c, i === r.pick) },
+          c.cover ? h('img', { src: c.cover, alt: '', loading: 'lazy', referrerPolicy: 'no-referrer' }) : h('span.meta-nocover'),
+          h('span.meta-text',
+            h('b', c.titleCn || c.title), c.titleCn && c.title && h('small', c.title),
+            h('small', [c.author, c.publisher || c.label, c.date && c.date.slice(0, 4), c.platform].filter(Boolean).join(' · ')),
+            h('span.meta-badges', i === r.pick && h('span.meta-badge.is-pick', `推荐${r.confidence ? ` · 把握 ${Math.round(r.confidence * 100)}%` : ''}`), h('span.meta-badge', c.source === 'bangumi' ? 'Bangumi' : 'AniList'))))));
+        if (r.pick != null) choose(r.candidates[r.pick], true);
+      } catch (e) { steps.replaceChildren(h('li.form-error', e.message)); }
+      finally { go.disabled = false; }
+    }
+    function choose(c, recommended) {
+      for (const el of list.children) el.classList.toggle('is-on', el.querySelector('b')?.textContent === (c.titleCn || c.title));
+      const use = {};
+      const opt = (k, label, value) => {
+        if (!value || (Array.isArray(value) && !value.length)) return null;
+        use[k] = true;
+        return h('label.meta-field', h('input', { type: 'checkbox', checked: true, onchange: (e) => { use[k] = e.target.checked; } }),
+          h('span', h('b', label), h('span', Array.isArray(value) ? value.map((t) => '#' + t).join(' ') : String(value).slice(0, 160) + (String(value).length > 160 ? '…' : ''))));
+      };
+      detail.replaceChildren(
+        h('h3', recommended ? '推荐结果，要填哪些？' : '要填哪些？'),
+        ...[opt('title', seed.volumeBook ? '系列名' : '书名', c.titleCn || c.title), opt('author', '作者', c.author), opt('illustrator', seed.kind === 'manga' ? '作画' : '插画', c.illustrator),
+          opt('publisher', '出版社', c.label || c.publisher), opt('date', '出版时间', !seed.volumeBook && c.date), opt('summary', '简介', c.summary), opt('tags', '标签', c.tags)].filter(Boolean),
+        c.aliases.length > 0 && h('p.field-hint', `别名：${c.aliases.slice(0, 8).join(' / ')}`),
+        h('a.link-btn', { href: c.url, target: '_blank', rel: 'noopener' }, `在 ${c.source === 'bangumi' ? 'Bangumi' : 'AniList'} 上看看`),
+        h('div.dialog-actions', h('button.btn.is-primary', { type: 'button', onclick: () => close({ candidate: c, use }) }, '填入')));
+    }
+    queueMicrotask(run);
+    return h('form.dialog-body.meta-dialog', { onsubmit: (e) => { e.preventDefault(); run(); } },
+      h('div.meta-search', q, kindSeg, go), steps, h('div.meta-cols', list, detail),
+      h('div.dialog-actions', h('button.btn', { type: 'button', onclick: () => close(null) }, '关闭')));
+  }, { wide: true });
+}
+
+/** 标签输入：回车、逗号或空格加一个，点 × 去掉；下面列出书库里已有的标签可以一点就加 */
+function tagEditor(initial = []) {
+  let tags = [...initial];
+  const input = h('input.tag-input', { type: 'text', placeholder: tags.length ? '' : '输入标签后回车，例如：恋爱、校园、异世界', 'aria-label': '添加标签', enterKeyHint: 'done' });
+  const box = h('div.tag-editor', { onclick: () => input.focus() });
+  const suggest = h('div.tag-suggest');
+  const known = allTags().map(([t]) => t);
+  const add = (raw) => {
+    for (const t of String(raw).split(/[,，、\s]+/).map((x) => x.replace(/^#/, '').trim().slice(0, 30)).filter(Boolean)) if (!tags.includes(t)) tags.push(t);
+    input.value = ''; draw();
+  };
+  function draw() {
+    box.replaceChildren(...tags.map((t) => h('span.tag-chip.is-edit', '#' + t, h('button', { type: 'button', 'aria-label': `去掉标签 ${t}`, onclick: (e) => { e.stopPropagation(); tags = tags.filter((x) => x !== t); draw(); } }, '×'))), input);
+    const q = input.value.trim().toLowerCase();
+    const opts = known.filter((t) => !tags.includes(t) && (!q || t.toLowerCase().includes(q))).slice(0, 12);
+    suggest.replaceChildren(...opts.map((t) => h('button.tag-chip.is-ghost', { type: 'button', onclick: () => { add(t); input.focus(); } }, '+ ' + t)));
+  }
+  input.addEventListener('keydown', (e) => {
+    if ((e.key === 'Enter' || e.key === ',' || e.key === '，') && input.value.trim()) { e.preventDefault(); add(input.value); }
+    else if (e.key === 'Backspace' && !input.value && tags.length) { tags.pop(); draw(); }
+  });
+  input.addEventListener('input', () => { if (/[,，、]/.test(input.value)) add(input.value); else draw(); });
+  input.addEventListener('blur', () => { if (input.value.trim()) add(input.value); });
+  draw();
+  return { el: h('div', box, suggest), get: () => (input.value.trim() ? (add(input.value), tags) : tags), set: (list) => { tags = [...new Set(list)]; draw(); } };
+}
+
 /** 把 2024/7/18、2024.07 这类写法整理成 2024-07-18 / 2024-07 */
 function normDate(v) {
   const m = String(v || '').trim().match(/^(\d{4})(?:[-/.年](\d{1,2})(?:[-/.月](\d{1,2}))?)?/);
@@ -974,6 +1098,24 @@ function editBook(id) {
     const names = [...new Set(Object.values(state.books).map((b) => b.series).filter(Boolean))];
     for (const f of [title, author, illustrator, series, volume]) f.addEventListener('input', drawSpine);
     queueMicrotask(drawSpine);
+    const tagBox = tagEditor(book.tags || []);
+    let extra = {}; // 查资料带来的、表单上没有输入框的字段（原名、Bangumi 编号）
+    // 自动查资料：确认后把选中的字段填进表单，还没保存
+    const fillFrom = (c, use) => {
+      const put = (input, v) => { if (v) { input.value = v; input.dispatchEvent(new Event('input')); } };
+      if (use.title) { if (series.value.trim() || book.series) put(series, c.titleCn || c.title); else put(title, c.titleCn || c.title); }
+      if (use.author) put(author, c.author);
+      if (use.illustrator) put(illustrator, c.illustrator);
+      if (use.publisher && c.publisher) { publisher.value = c.label || c.publisher; imprint = ''; drawSpine(); }
+      if (use.date && c.date && !book.series) put(published, c.date);
+      if (use.summary) put(description, c.summary);
+      if (use.tags && c.tags.length) tagBox.set([...tagBox.get(), ...c.tags]);
+      extra = { originalTitle: c.title || '', bangumiId: c.source === 'bangumi' ? c.id : (book.bangumiId ?? null) };
+      toast('已填入，检查一下再保存');
+    };
+    const lookupBtn = h('button.link-btn', { type: 'button', onclick: () => lookupMeta({
+      query: series.value.trim() || title.value.trim(), kind: book.format === 'cbz' ? 'manga' : 'novel', author: author.value.trim(), volumeBook: !!series.value.trim(),
+    }).then((r) => r && fillFrom(r.candidate, r.use)) }, icon('search2', 16), '自动查资料');
     return h('form.dialog-body', {
       onsubmit: async (e) => {
         e.preventDefault();
@@ -981,12 +1123,12 @@ function editBook(id) {
           title: title.value, author: author.value, illustrator: illustrator.value.trim(), publisher: publisher.value.trim(), status,
           rating, review: review.value.trim(), description: description.value.trim(),
           series: series.value.trim(), volume: volume.value === '' ? null : Number(volume.value),
-          imprint, published: normDate(published.value), imprintMark: mark,
+          imprint, published: normDate(published.value), imprintMark: mark, tags: tagBox.get(), ...extra,
         };
         if (await guard(() => store.updateBook(id, patch), '已保存')) { close(); exitSelect(false); renderAll(); }
       },
     },
-    h('label.field-label', '书名'), title,
+    h('div.label-row', h('label.field-label', '书名'), lookupBtn), title,
     h('div.field-pair.is-even',
       h('div', h('label.field-label', book.format === 'cbz' ? '作者 / 原作' : '作者'), author),
       h('div', h('label.field-label', book.format === 'cbz' ? '作画' : '插画'), illustrator)),
@@ -997,6 +1139,7 @@ function editBook(id) {
     h('div.label-row', h('label.field-label', '简介'),
       h('button.link-btn', { type: 'button', onclick: () => fillWithAi(description, descStatus, { kind: 'book', title: book.title, author: author.value, illustrator: illustrator.value, publisher: publisher.value, volume: book.volume, existing: book.description }) }, icon('sparkle', 16), '让助手写')),
     description, descStatus,
+    h('label.field-label', '标签'), tagBox.el,
     h('label.field-label', '阅读状态'), statusSeg,
     h('div.field-pair',
       h('div', h('label.field-label', '系列'), series),
@@ -1415,6 +1558,29 @@ async function syncCoverAccent(force = false) {
   } catch { coverAccentFor = null; }
 }
 
+// ---------- 作品资料（自动查资料）的设置 ----------
+const META_DEFAULT = { bangumiToken: '', dsKey: '', judge: 'assistant', base: '', key: '', model: '' };
+const metaSettings = () => ({ ...META_DEFAULT, ...prefs.get('meta', {}) });
+function metaSettingsCard() {
+  const m = metaSettings();
+  const field = (k, type, ph) => h('input.field', { type, value: m[k], placeholder: ph, autocomplete: 'off', spellcheck: false, onchange: (e) => prefs.set('meta', { ...metaSettings(), [k]: e.target.value.trim() }) });
+  const custom = h('div.meta-custom', { hidden: m.judge !== 'custom' },
+    h('label.field-label', '接口地址'), field('base', 'url', '例如 https://api.deepseek.com/v1，或 Liquid 的 OpenAI 兼容地址'),
+    h('label.field-label', 'API Key'), field('key', 'password', 'sk-…'),
+    h('label.field-label', '模型'), field('model', 'text', '例如 deepseek-chat、lfm-2.5-…'));
+  const judgeSeg = h('div.segmented', { role: 'group', 'aria-label': '谁来挑选' }, [['assistant', '用阅读助手'], ['custom', '单独的模型'], ['off', '只按名字']].map(([v, t]) => h('button' + (m.judge === v ? '.is-on' : ''), {
+    type: 'button', onclick: (e) => { prefs.set('meta', { ...metaSettings(), judge: v }); for (const b of e.currentTarget.parentElement.children) b.classList.toggle('is-on', b === e.currentTarget); custom.hidden = v !== 'custom'; },
+  }, t)));
+  return h('section.set-card',
+    h('h2', '自动查资料'),
+    h('p.field-hint', '编辑书籍信息时可以一键查：先在 Bangumi（中文资料、标签）和 AniList（英文名、罗马音）里找；名字不标准查不到时，再用 DeepSeek 网页搜索确认正式名字；最后由模型挑出最像的一条，你确认后才会填进去。Bangumi 和 AniList 查公开资料不需要申请应用。'),
+    h('label.field-label', 'DeepSeek 搜索 Key（可选）'), field('dsKey', 'password', '和 DeepSeek 对话用的是同一种 Key'),
+    h('p.field-hint', '每查一次最多调用 1 次搜索，名字本来就准的不会调用。DeepSeek 的搜索接口按成功次数计费。'),
+    h('label.field-label', 'Bangumi Access Token（可选）'), field('bangumiToken', 'password', '不填也能查；填了可以查到需要登录才显示的条目'),
+    row('谁来挑选', judgeSeg, '“只按名字”不调用模型，最省钱，但遇到同名作品可能挑错'),
+    custom);
+}
+
 function settingsAi() {
   const s = ai.aiSettings();
   const base = h('input.field', { type: 'url', value: s.base, placeholder: 'https://api.openai.com/v1' });
@@ -1446,7 +1612,8 @@ function settingsAi() {
           catch (e) { result.textContent = `连接失败：${e.message}`; }
         } }, '测试连接')),
       result,
-      h('p.field-hint', 'API Key 只保存在这台设备上，不会上传到同步服务器（经服务器转发时只是临时经过）。')),
+      h('p.field-hint', store.isConfigured() ? 'API Key 会随账号同步到你自己的服务器，换设备登录不用重填；不会发给其他任何地方。' : 'API Key 只保存在这台设备上。')),
+    metaSettingsCard(),
     h('section.set-card',
       h('h2', '翻译'),
       row('默认翻译成', targetSeg, '查词的解释也用这种语言')),

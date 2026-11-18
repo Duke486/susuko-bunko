@@ -5,7 +5,7 @@ import { Epub } from './epub.js';
 // ---------- 本机设置 ----------
 const LS = 'shiori.';
 // 跟着账号走的设置：登录后在每台设备上都一样（设备名、缓存之类的本机设置不在其中）
-export const SYNCED_PREFS = ['ai', 'tts', 'reader', 'comic', 'accent', 'theme', 'layout', 'stack', 'pill', 'sort'];
+export const SYNCED_PREFS = ['ai', 'tts', 'reader', 'comic', 'comicBooks', 'meta', 'accent', 'theme', 'layout', 'stack', 'pill', 'sort'];
 let onSyncedPrefChange = null;
 export const prefs = {
   get(key, fallback) {
@@ -719,6 +719,9 @@ function patchLocal(book, body) {
   if (['', 'reading', 'finished'].includes(body.status)) book.status = body.status;
   if (typeof body.imprint === 'string') book.imprint = str(body.imprint, 40);
   if (typeof body.imprintMark === 'string') book.imprintMark = str(body.imprintMark, 60);
+  if (Array.isArray(body.tags)) book.tags = (Array.isArray(body.tags) ? [...new Set(body.tags.map((t) => String(t).replace(/^#/, '').trim().slice(0, 30)).filter(Boolean))].slice(0, 40) : []);
+  if (typeof body.originalTitle === 'string') book.originalTitle = str(body.originalTitle, 300);
+  if (typeof body.bangumiId === 'number' || body.bangumiId === null) book.bangumiId = body.bangumiId;
   if (typeof body.published === 'string') book.published = /^\d{4}(-\d{2}(-\d{2})?)?$/.test(body.published.trim()) ? body.published.trim() : '';
   if (typeof body.spineFace === 'string') book.spineFace = body.spineFace;
   if ('volume' in body) book.volume = body.volume === null || body.volume === '' || !Number.isFinite(Number(body.volume)) ? null : Number(body.volume);
@@ -766,6 +769,9 @@ export async function importBook(file, collectionIds = []) {
   persist(); emit();
   return { book: saved, duplicate };
 }
+
+/** 自动查作品资料（经自己的服务器去 Bangumi / AniList / DeepSeek 搜索） */
+export const metaLookup = (body) => apiJson('/api/meta/lookup', 'POST', body);
 
 // ---------- 百度网盘 ----------
 direct.useApi(apiJson);
@@ -902,7 +908,7 @@ export async function uploadLocalLibrary(onStep) {
       }
       book = (await apiJson('/api/books/' + book.id, 'PATCH', {
         description: b.description || '', status: b.status || '', rating: b.rating || 0, review: b.review || '',
-        imprint: b.imprint || '', imprintMark: b.imprintMark || '', published: b.published || '',
+        imprint: b.imprint || '', imprintMark: b.imprintMark || '', published: b.published || '', tags: b.tags || [], originalTitle: b.originalTitle || '',
         collections: (b.collections || []).map((c) => colMap[c]).filter(Boolean),
       })).book;
       idMap[b.id] = book.id;

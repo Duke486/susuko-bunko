@@ -37,6 +37,8 @@ const paths = {
   folder: '<path d="M3.5 7.5v10.5h17V8.5h-8.5l-2-2.5H3.5z"/>',
   down: '<path d="M12 4v12M7 11.5l5 5 5-5M5 20h14"/>',
   prev: '<path d="M14.5 6l-6 6 6 6"/>',
+  tag: '<path d="M3.5 12.2V4.5a1 1 0 0 1 1-1h7.7l8.3 8.3a1.5 1.5 0 0 1 0 2.1l-6.1 6.1a1.5 1.5 0 0 1-2.1 0z"/><circle cx="8" cy="8" r="1.4"/>',
+  search2: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.2-4.2"/>',
   next: '<path d="M9.5 6l6 6-6 6"/>',
   chevron: '<path d="M7 10l5 5 5-5"/>',
   chevronRight: '<path d="M10 6l6 6-6 6"/>',

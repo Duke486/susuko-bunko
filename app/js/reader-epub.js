@@ -605,10 +605,14 @@ ${hl}
     };
     if (!animated || calm) { apply(); return; }
     // 只用透明度过渡：给整页加模糊滤镜很吃性能，换字体这种要整章重排的操作会因此卡一下
+    // 注意：淡出动画用了 fill:'forwards'，结束后必须取消掉，否则它会一直把页面压在 20% 透明度（以前换字体后字变淡就是这个原因）
     relayoutAnim?.cancel();
-    relayoutAnim = frame.animate([{ opacity: 1 }, { opacity: 0.2 }], { duration: 100, easing: 'ease-in', fill: 'forwards' });
-    relayoutAnim.onfinish = () => {
+    for (const an of frame.getAnimations()) an.cancel();
+    const out = frame.animate([{ opacity: 1 }, { opacity: 0.2 }], { duration: 100, easing: 'ease-in', fill: 'forwards' });
+    relayoutAnim = out;
+    out.onfinish = () => {
       apply();
+      out.cancel();
       relayoutAnim = frame.animate([{ opacity: 0.2, transform: 'translateY(4px)' }, { opacity: 1, transform: 'none' }], { duration: 260, easing: 'cubic-bezier(.2,.7,.2,1)' });
     };
   }

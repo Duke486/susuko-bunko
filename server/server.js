@@ -13,6 +13,7 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { Readable } = require('node:stream');
+const meta = require('./meta.js');
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -21,7 +22,7 @@ const OPEN_SIGNUP = process.env.OPEN_SIGNUP === '1';
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const APP_DIR = path.resolve(process.env.APP_DIR || path.join(__dirname, '..', 'app'));
 const MAX_BOOK_BYTES = Number(process.env.MAX_BOOK_MB || 2048) * 1024 * 1024;
-const VERSION = '0.10.0';
+const VERSION = '0.11.0';
 // 百度网盘开放平台应用（也可以每个账号在设置里自己填）
 const BAIDU_APP_KEY = process.env.BAIDU_APP_KEY || '';
 const BAIDU_SECRET_KEY = process.env.BAIDU_SECRET_KEY || '';
@@ -277,6 +278,9 @@ function patchBook(book, body, lib) {
   if (typeof body.series === 'string') book.series = str(body.series, 200);
   if (typeof body.imprint === 'string') book.imprint = str(body.imprint, 40);
   if (typeof body.imprintMark === 'string') book.imprintMark = str(body.imprintMark, 60);
+  if (Array.isArray(body.tags)) book.tags = (Array.isArray(body.tags) ? [...new Set(body.tags.map((t) => String(t).replace(/^#/, '').trim().slice(0, 30)).filter(Boolean))].slice(0, 40) : []);
+  if (typeof body.originalTitle === 'string') book.originalTitle = str(body.originalTitle, 300);
+  if (typeof body.bangumiId === 'number' || body.bangumiId === null) book.bangumiId = body.bangumiId;
   if (typeof body.published === 'string') book.published = dateOf(body.published);
   if (typeof body.spineFace === 'string') book.spineFace = /^(none|[01](\.\d{1,3})?,[01](\.\d{1,3})?)?$/.test(body.spineFace) ? body.spineFace : '';
   if ('volume' in body) book.volume = volumeOf(body.volume);
@@ -627,6 +631,17 @@ async function api(req, res, url) {
   }
   if (seg[0] === 'cloud' && seg[1] === 'baidu') return baiduApi(req, res, seg.slice(2), q, lib);
   if (seg[0] === 'ai' && M === 'POST') return aiProxy(req, res);
+  if (seg[0] === 'meta' && seg[1] === 'lookup' && M === 'POST') { // 自动查作品资料
+    const body = await readJson(req, 64 * 1024);
+    let ai = null;
+    if (body.ai?.url) { try { const u = new URL(body.ai.url); if (/^https?:$/.test(u.protocol)) ai = { url: u.href, key: str(body.ai.key, 300), model: str(body.ai.model, 100) }; } catch { /* 地址不对就不用模型 */ } }
+    try {
+      return json(res, 200, await meta.lookup({
+        query: str(body.query, 200), kind: body.kind, author: str(body.author, 100),
+        bangumiToken: str(body.bangumiToken, 200), dsKey: str(body.dsKey, 200), ai,
+      }));
+    } catch (e) { return fail(res, e.status === 400 ? 400 : 502, e.message); }
+  }
 
   if (seg[0] === 'books') {
     if (seg.length === 1 && M === 'POST') return uploadBook(req, res, q, lib);
