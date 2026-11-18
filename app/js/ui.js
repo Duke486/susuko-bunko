@@ -20,6 +20,10 @@ export function h(spec, props, ...children) {
 }
 
 const paths = {
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  sidebar: '<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M9.5 4.5v15"/>',
+  caret: '<path d="M10 7.5l5 4.5-5 4.5z" fill="currentColor" stroke-width="1.2"/>',
+  openBook: '<path d="M12 6.5C10 5 7.2 4.5 4 4.8v13.4c3.2-.3 6 .2 8 1.8 2-1.6 4.8-2.1 8-1.8V4.8c-3.2-.3-6 .2-8 1.7zM12 6.5V20" fill="currentColor" fill-opacity=".18"/>',
   back: '<path d="M15 5l-7 7 7 7"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   search: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
@@ -242,6 +246,7 @@ export function dropdown({ label, value, options, onChange }) {
     document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', onKey, true);
   });
   draw();
+  root.set = (v) => { value = v; draw(); };
   return root;
 }
 

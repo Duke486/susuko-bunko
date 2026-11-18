@@ -179,6 +179,7 @@ function openSeries(name) {
 }
 /** keepSelect：进出系列时保留多选状态，方便先找到书再勾选 */
 function setFilter(filter, keepSelect = false) {
+  if (document.body.classList.contains('nav-open')) setDrawer(false);
   view.filter = filter;
   if (!isSeries(filter) && !isPage(filter)) prefs.set('filter', filter);
   if (!keepSelect) exitSelect(false);
@@ -232,14 +233,46 @@ function renderShelf() {
   els.syncBtn = h('button.icon-btn', { type: 'button', onclick: manualSync });
   els.importBtn = h('button.btn.is-primary', { type: 'button', 'aria-haspopup': 'menu', onclick: () => importMenu(els.importBtn) }, icon('plus', 18), '导入');
   els.intro = h('section.series-intro', { hidden: true });
-  els.main = h('main.main', h('header.topbar', els.heading, els.tools), els.intro, els.body, fileInput);
-
-  app.replaceChildren(h('div.shell',
-    h('aside.side',
-      h('div.brand', h('img.brand-icon', { src: 'icon-96.png', alt: '' }), h('span.brand-name', 'スス子文庫')),
-      els.nav, els.me),
-    els.main, els.detail, els.pill, els.bar));
+  // 手机：左上角汉堡按钮打开侧栏抽屉；右上角“更多”收着视图、排序、选择、同步、导入
+  els.menuBtn = h('button.icon-btn.menu-btn', { type: 'button', 'aria-label': '打开菜单', title: '菜单', onclick: () => setDrawer(true) }, icon('menu', 22));
+  els.moreBtn = h('button.icon-btn.more-btn', { type: 'button', 'aria-label': '更多操作', title: '更多', 'aria-haspopup': 'menu', onclick: () => moreMenu(els.moreBtn) }, icon('more', 22));
+  els.main = h('main.main', h('header.topbar', els.menuBtn, els.heading, els.tools), els.intro, els.body, fileInput);
+  // 电脑：侧栏顶上一个按钮，收成只剩图标的窄条
+  const sideBtn = h('button.icon-btn.side-toggle', { type: 'button', onclick: () => setSideMini(!prefs.get('sideMini', false)) }, icon('sidebar', 20));
+  els.side = h('aside.side', h('div.side-top', sideBtn), els.nav, els.me);
+  els.sideBtn = sideBtn;
+  els.shell = h('div.shell', els.side, els.main, els.detail, els.pill, els.bar, h('div.drawer-scrim', { onclick: () => setDrawer(false) }));
+  app.replaceChildren(els.shell);
+  setSideMini(prefs.get('sideMini', false), false);
   renderAll();
+}
+
+function setSideMini(on, save = true) {
+  if (save) prefs.set('sideMini', on);
+  els.shell.classList.toggle('is-mini', on);
+  const label = on ? '展开侧栏' : '收起侧栏';
+  els.sideBtn.title = label; els.sideBtn.setAttribute('aria-label', label); els.sideBtn.setAttribute('aria-expanded', String(!on));
+}
+function setDrawer(open) {
+  document.body.classList.toggle('nav-open', open);
+  els.menuBtn?.setAttribute('aria-expanded', String(open));
+  if (open) els.nav.querySelector('.is-active, .nav-item')?.focus({ preventScroll: true });
+}
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.body.classList.contains('nav-open')) { e.stopPropagation(); setDrawer(false); els.menuBtn.focus(); } }, true);
+
+/** 手机上的“更多”菜单：视图、排序、选择、同步、导入 */
+function moreMenu(anchor) {
+  const tick = (on) => (on ? 'check' : 'blank');
+  popMenu(anchor, [
+    { title: '查看方式', items: [['shelf', '立体书架'], ['grid', '封面宫格'], ['list', '列表']].map(([v, label]) => ({ icon: tick(view.layout === v), label, on: view.layout === v, onclick: () => setLayout(v) })) },
+    { title: '排序', items: [['recent', '最近阅读'], ['added', '最近添加'], ['published', '出版时间'], ['title', '按书名']].map(([v, label]) => ({ icon: tick(view.sort === v), label, on: view.sort === v, onclick: () => { view.sort = v; prefs.set('sort', v); els.sort.set?.(v); renderBody(); } })) },
+    { items: [
+      { icon: 'checkCircle', label: view.selecting ? '完成选择' : '选择多本', onclick: () => (view.selecting ? exitSelect() : enterSelect()) },
+      ...(store.isConfigured() ? [{ icon: 'sync', label: '立即同步', onclick: manualSync }] : []),
+      { icon: 'upload', label: '从这台设备导入', sub: 'EPUB、CBZ / ZIP', onclick: () => els.fileInput.click() },
+      { icon: 'cloud', label: '从百度网盘添加', onclick: () => openBaiduBrowser() },
+    ] },
+  ]);
 }
 
 function renderAll() {
@@ -254,8 +287,8 @@ function renderAll() {
 const NAV_COLORS = { all: '#3B82F6', reading: '#F59E0B', finished: '#10B981', none: '#8B5CF6', collection: '#EAB308', excerpts: '#14B8A6', stats: '#EC4899', settings: '#64748B', tag: '#8B7BD8' };
 function renderNav() {
   const active = isSeries(view.filter) ? view.back || 'all' : view.filter;
-  const item = (filter, iconName, label, color, count) => h('button.nav-item' + (active === filter ? '.is-active' : ''), {
-    type: 'button', 'aria-current': active === filter ? 'page' : null, style: `--c:${color}`, onclick: () => setFilter(filter),
+  const item = (filter, iconName, label, color, count) => h('button.nav-item' + (active === filter ? '.is-active' : '') + (filter.startsWith('tag') ? '.is-tag' : ''), {
+    type: 'button', 'aria-current': active === filter ? 'page' : null, style: `--c:${color}`, onclick: () => setFilter(filter), title: label,
   }, icon(iconName, 20), h('span.nav-label', label), count != null && h('span.nav-count', count));
   const markCount = Object.values(state.marks).reduce((n, l) => n + Object.values(l).filter((m) => m.type !== 'bookmark').length, 0);
   els.nav.replaceChildren(
@@ -279,12 +312,22 @@ function renderNav() {
 function navTags(item) {
   const tags = allTags();
   if (!tags.length) return [];
-  const shown = tags.slice(0, 8);
+  const open = prefs.get('tagsOpen', false); // 默认收起
+  const head = h('button.nav-section.nav-fold' + (open ? '.is-open' : ''), {
+    type: 'button', 'aria-expanded': String(open), title: open ? '收起标签' : '展开标签',
+    onclick: () => { prefs.set('tagsOpen', !open); renderNav(); },
+  }, h('span', '标签'), h('span.nav-fold-n', String(tags.length)), icon('caret', 16));
+  if (!open) {
+    // 收起时，正在看的那个标签仍然留一行，免得找不到自己在哪
+    const cur = isTag(view.filter) && tags.find(([t]) => 'tag:' + t === view.filter);
+    return [head, cur && item(view.filter, 'tag', cur[0], NAV_COLORS.tag, cur[1])].filter(Boolean);
+  }
+  const shown = tags.slice(0, 12);
   return [
-    h('div.nav-section', h('span', '标签')),
-    ...shown.map(([t, n]) => item('tag:' + t, 'tag', t, NAV_COLORS.tag || '#8B7BD8', n)),
-    tags.length > shown.length && item('tags', 'tag', `全部标签（${tags.length}）`, NAV_COLORS.tag || '#8B7BD8'),
-  ].filter(Boolean);
+    head,
+    ...shown.map(([t, n]) => item('tag:' + t, 'tag', t, NAV_COLORS.tag, n)),
+    item('tags', 'tag', tags.length > shown.length ? `全部标签（${tags.length}）` : '标签一览', NAV_COLORS.tag),
+  ];
 }
 
 function renderMe() {
@@ -324,7 +367,7 @@ function renderTools() {
   const label = view.selecting ? '完成选择' : '选择';
   els.selectBtn.title = label; els.selectBtn.setAttribute('aria-label', label);
   els.selectBtn.classList.toggle('is-on', view.selecting);
-  els.tools.replaceChildren(els.searchBox, els.layoutSeg, els.sort, els.selectBtn, ...(store.isConfigured() ? [els.syncBtn] : []), els.importBtn);
+  els.tools.replaceChildren(els.searchBox, els.layoutSeg, els.sort, els.selectBtn, ...(store.isConfigured() ? [els.syncBtn] : []), els.importBtn, els.moreBtn);
   renderSync();
 }
 
@@ -453,7 +496,7 @@ function groupSeries(list) {
   const done = new Set(), out = [];
   for (const b of list) {
     const group = b.series ? groups.get(b.series) : null;
-    if (group && group.length > 1) { if (!done.has(b.series)) { done.add(b.series); out.push({ series: b.series, books: group }); } }
+    if (group) { /* 填了系列名就算系列，哪怕只有一本 */ if (!done.has(b.series)) { done.add(b.series); out.push({ series: b.series, books: group }); } }
     else out.push({ book: b });
   }
   return out;
@@ -647,8 +690,8 @@ function drawShelfCaption() {
         !it.group.series && h('button.btn', { type: 'button', onclick: () => showDetail(b.id) }, '详情'),
         h('button.btn.is-primary', { type: 'button', onclick: open }, it.group.series ? '打开系列' : p > 0 ? '继续阅读' : '开始阅读'))),
     h('p.cap-desc' + (desc ? '' : '.is-empty'), desc ? desc.replace(/\s*\n\s*/g, ' ') : '还没有简介，可以在“编辑信息”里写。'));
-  // 宽屏时书架旁边直接显示选中那本的详情
-  if (!it.group.series && view.detail !== b.id && window.innerWidth > 1180 && (!view.detail || view.autoDetail)) { view.detail = b.id; view.autoDetail = true; renderDetail(); }
+  // 书架下面已经有标题和简介，不再自动弹出右侧详情；以前自动弹出的，滑走就关掉
+  if (view.autoDetail && view.detail) hideDetail();
 }
 
 function renderEmpty() {
@@ -686,7 +729,9 @@ function renderPill() {
   els.pill.replaceChildren(
     h('span.pill-cover', coverOf(b)),
     h('span.pill-text', h('span.pill-title', bookLabel(b)), h('span.pill-sub', `继续阅读 · ${fmtPercent(Math.min(p, 0.99))}${b.author ? ' · ' + b.author : ''}`)),
-    h('span.pill-ring', { style: `--p:${Math.min(1, p)}` }, icon('play', 16)));
+    h('span.pill-ring', { style: `--p:${Math.min(1, p)}` }, icon('play', 16)),
+    h('span.pill-fab', { 'aria-hidden': 'true' }, icon('openBook', 26)));
+  els.pill.setAttribute('aria-label', `继续阅读《${bookLabel(b)}》`);
 }
 
 // ---------- 图书详情 ----------
@@ -977,24 +1022,30 @@ function lookupMeta(seed) {
 function tagEditor(initial = []) {
   let tags = [...initial];
   const input = h('input.tag-input', { type: 'text', placeholder: tags.length ? '' : '输入标签后回车，例如：恋爱、校园、异世界', 'aria-label': '添加标签', enterKeyHint: 'done' });
-  const box = h('div.tag-editor', { onclick: () => input.focus() });
+  const chips = h('span.tag-chips');
+  const box = h('div.tag-editor', { onclick: (e) => { if (e.target === box || e.target === chips) input.focus(); } }, chips, input);
   const suggest = h('div.tag-suggest');
   const known = allTags().map(([t]) => t);
   const add = (raw) => {
     for (const t of String(raw).split(/[,，、\s]+/).map((x) => x.replace(/^#/, '').trim().slice(0, 30)).filter(Boolean)) if (!tags.includes(t)) tags.push(t);
     input.value = ''; draw();
   };
+  // 输入框本身始终留在原位，只重画前面的标签和下面的建议——挪动输入框会让它失去焦点、收起键盘
   function draw() {
-    box.replaceChildren(...tags.map((t) => h('span.tag-chip.is-edit', '#' + t, h('button', { type: 'button', 'aria-label': `去掉标签 ${t}`, onclick: (e) => { e.stopPropagation(); tags = tags.filter((x) => x !== t); draw(); } }, '×'))), input);
+    chips.replaceChildren(...tags.map((t) => h('span.tag-chip.is-edit', '#' + t, h('button', { type: 'button', 'aria-label': `去掉标签 ${t}`, onclick: (e) => { e.stopPropagation(); tags = tags.filter((x) => x !== t); draw(); } }, '×'))));
+    input.placeholder = tags.length ? '' : '输入标签后回车，例如：恋爱、校园、异世界';
     const q = input.value.trim().toLowerCase();
     const opts = known.filter((t) => !tags.includes(t) && (!q || t.toLowerCase().includes(q))).slice(0, 12);
-    suggest.replaceChildren(...opts.map((t) => h('button.tag-chip.is-ghost', { type: 'button', onclick: () => { add(t); input.focus(); } }, '+ ' + t)));
+    suggest.replaceChildren(...opts.map((t) => h('button.tag-chip.is-ghost', { type: 'button', onpointerdown: (e) => e.preventDefault(), onclick: () => { add(t); input.focus(); } }, '+ ' + t)));
   }
   input.addEventListener('keydown', (e) => {
+    if (e.isComposing || e.keyCode === 229) return; // 输入法还在选字
     if ((e.key === 'Enter' || e.key === ',' || e.key === '，') && input.value.trim()) { e.preventDefault(); add(input.value); }
+    else if (e.key === 'Enter') e.preventDefault(); // 空回车不提交整个表单
     else if (e.key === 'Backspace' && !input.value && tags.length) { tags.pop(); draw(); }
   });
-  input.addEventListener('input', () => { if (/[,，、]/.test(input.value)) add(input.value); else draw(); });
+  input.addEventListener('input', (e) => { if (e.isComposing) return; if (/[,，、]/.test(input.value)) add(input.value); else draw(); });
+  input.addEventListener('compositionend', () => { if (/[,，、]/.test(input.value)) add(input.value); else draw(); });
   input.addEventListener('blur', () => { if (input.value.trim()) add(input.value); });
   draw();
   return { el: h('div', box, suggest), get: () => (input.value.trim() ? (add(input.value), tags) : tags), set: (list) => { tags = [...new Set(list)]; draw(); } };
@@ -1093,7 +1144,7 @@ function editBook(id) {
       type: 'button', onclick: () => { status = value; drawStatus(); },
     }, label)));
     drawStatus();
-    const series = h('input.field', { type: 'text', value: book.series || '', maxLength: 200, placeholder: '不属于系列就留空', list: 'series-names' });
+    const series = h('input.field', { type: 'text', value: book.series || '', maxLength: 200, placeholder: '填了就按系列显示，只有一本也可以', list: 'series-names' });
     const volume = h('input.field', { type: 'number', value: book.volume ?? '', min: 0, step: 'any', placeholder: '例如 3', inputMode: 'decimal' });
     const names = [...new Set(Object.values(state.books).map((b) => b.series).filter(Boolean))];
     for (const f of [title, author, illustrator, series, volume]) f.addEventListener('input', drawSpine);
@@ -1677,7 +1728,7 @@ function popMenu(anchor, sections) {
   const menu = h('div.pop-menu', { role: 'menu' }, sections.map((sec, i) => [
     i > 0 && h('hr.pop-sep'),
     sec.title && h('div.pop-title', sec.title),
-    sec.items.map((it) => h('button.pop-item', { type: 'button', role: 'menuitem', onclick: () => { close(); it.onclick(); } },
+    sec.items.map((it) => h('button.pop-item' + (it.on ? '.is-on' : ''), { type: 'button', role: it.on != null ? 'menuitemradio' : 'menuitem', 'aria-checked': it.on != null ? String(!!it.on) : null, onclick: () => { close(); it.onclick(); } },
       h('span.pop-icon', icon(it.icon, 20)), h('span.pop-text', h('b', it.label), it.sub && h('small', it.sub)))),
   ]));
   const close = () => { menu.remove(); document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', esc, true); };
