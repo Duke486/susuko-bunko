@@ -11,6 +11,9 @@ export async function open({ host, book, title = book.title, source, progress, o
   const entries = zip.entries.filter((e) => !e.isDir && isImageName(e.name)).sort((a, b) => natural(a.name, b.name));
   if (!entries.length) throw new Error(source.isPageList ? '这个文件夹里没有图片' : '压缩包里没有图片');
   const total = entries.length;
+  // 本机文件读得快，预读两页就够；从服务器或网盘取的要多预读几页，翻页时才不用等
+  const remote = !(source instanceof Blob);
+  const AHEAD = remote ? 5 : 2;
   const settings = { ...DEFAULTS, ...prefs.get('comic', {}) };
   let page = Math.min(total - 1, Math.max(0, Number(progress?.loc?.page) || 0));
   let destroyed = false, cleanupView = () => {};
@@ -88,11 +91,19 @@ export async function open({ host, book, title = book.title, source, progress, o
       const t = ++token;
       const g = group(page);
       page = g[0];
+      for (let i = g[g.length - 1] + 1; i <= Math.min(total - 1, g[g.length - 1] + AHEAD); i++) urlOf(i); // 先把后面几页排上队
+      // 这一页还没取到时，过一小会儿显示“正在加载”，不让画面看起来卡住
+      const wait = setTimeout(() => { if (t === token) holder.classList.add('is-loading'); }, 150);
       const srcs = await Promise.all(g.map(urlOf)).catch(() => null);
+      if (t !== token || destroyed) { clearTimeout(wait); return; }
+      if (!srcs) { clearTimeout(wait); holder.classList.remove('is-loading'); toast('这一页读不出来，可能是网络断了', { error: true }); return; }
+      const imgs = srcs.map((src, n) => h('img', { src, alt: `第 ${g[n] + 1} 页`, draggable: false }));
+      await Promise.all(imgs.map((im) => im.decode().catch(() => {}))); // 先在后台解码好大图，换页时就不会顿一下
+      clearTimeout(wait);
       if (t !== token || destroyed) return;
-      if (!srcs) { toast('这一页解不出来', { error: true }); return; }
+      holder.classList.remove('is-loading');
       holder.classList.toggle('is-rtl', settings.rtl);
-      holder.replaceChildren(...srcs.map((src, n) => h('img', { src, alt: `第 ${g[n] + 1} 页`, draggable: false })));
+      holder.replaceChildren(...imgs);
       const turn = prefs.get('reader', {}).turn || 'slide'; // 和小说共用“翻页动画”设置
       if (shown >= 0 && shown !== page && !calm && turn !== 'none') {
         const from = (page > shown ? 1 : -1) * (settings.rtl ? -1 : 1); // 新的一页从哪一侧进来
@@ -101,8 +112,8 @@ export async function open({ host, book, title = book.title, source, progress, o
       shown = page;
       report(g[g.length - 1], saveNow);
       const last = g[g.length - 1];
-      for (let i = last + 1; i <= Math.min(total - 1, last + 2); i++) urlOf(i);
-      evict(page, 6);
+      if (g[0] > 0) urlOf(g[0] - 1); // 往回翻一页也常见
+      evict(page, AHEAD + 6);
     }
     function next() {
       const g = group(page);
@@ -174,7 +185,7 @@ export async function open({ host, book, title = book.title, source, progress, o
           }).catch(() => {});
         }
       }
-    }, { root: scroller, rootMargin: '150% 0px' });
+    }, { root: scroller, rootMargin: remote ? '400% 0px' : '150% 0px' });
     items.forEach((el) => loader.observe(el));
 
     let ticking = false;

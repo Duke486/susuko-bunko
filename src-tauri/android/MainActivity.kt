@@ -72,6 +72,10 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     web = webView
     webView.addJavascriptInterface(Bridge(), "SusukoNative")
+    // 安卓网页视图默认把小于 8px 的字放大到 8px、还会按系统字号缩放，书脊上的小字会因此撑出书外
+    webView.settings.minimumFontSize = 1
+    webView.settings.minimumLogicalFontSize = 1
+    webView.settings.textZoom = 100
   }
 
   override fun dispatchKeyEvent(event: KeyEvent): Boolean {

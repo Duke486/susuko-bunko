@@ -182,9 +182,20 @@ ${hl}
   const frameWin = () => frame.contentWindow;
   const scroller = () => frameDoc()?.documentElement;
   function measure() {
-    const el = scroller();
+    const el = scroller(), doc = frameDoc();
     if (!el || isScroll()) return;
-    pages = isVertical() ? Math.max(1, Math.ceil((el.scrollHeight - 2) / H)) : Math.max(1, Math.ceil((el.scrollWidth - 2) / W));
+    for (const f of doc.querySelectorAll('.shiori-fill')) f.remove();
+    const size = () => (isVertical() ? el.scrollHeight : el.scrollWidth);
+    const step = isVertical() ? H : W;
+    pages = Math.max(1, Math.ceil((size() - 2) / step));
+    // 多栏排版时，浏览器算滚动范围不含最后一栏右边的页边距，最后一页滚不到整页的位置，字会整体歪到一边。
+    // 在最后一页的末尾放一个看不见的 1px 小块，把滚动范围撑到整页。
+    if (doc.body) {
+      const f = doc.createElement('div');
+      f.className = 'shiori-fill'; f.setAttribute('aria-hidden', 'true');
+      f.style.cssText = `position:absolute;width:1px;height:1px;pointer-events:none;${isVertical() ? `left:0;top:${pages * step - 1}px` : `top:0;left:${pages * step - 1}px`}`;
+      doc.body.append(f);
+    }
   }
   /** 本章内的位置 0~1（页或滚动位置的起点） */
   function fractionNow() {
@@ -592,11 +603,12 @@ ${hl}
       paintHighlights();
     };
     if (!animated || calm) { apply(); return; }
+    // 只用透明度过渡：给整页加模糊滤镜很吃性能，换字体这种要整章重排的操作会因此卡一下
     relayoutAnim?.cancel();
-    relayoutAnim = frame.animate([{ opacity: 1, filter: 'blur(0)' }, { opacity: 0.25, filter: 'blur(4px)' }], { duration: 110, easing: 'ease-in', fill: 'forwards' });
+    relayoutAnim = frame.animate([{ opacity: 1 }, { opacity: 0.2 }], { duration: 100, easing: 'ease-in', fill: 'forwards' });
     relayoutAnim.onfinish = () => {
       apply();
-      relayoutAnim = frame.animate([{ opacity: 0.25, filter: 'blur(4px)', transform: 'translateY(4px)' }, { opacity: 1, filter: 'blur(0)', transform: 'none' }], { duration: 280, easing: 'cubic-bezier(.2,.7,.2,1)' });
+      relayoutAnim = frame.animate([{ opacity: 0.2, transform: 'translateY(4px)' }, { opacity: 1, transform: 'none' }], { duration: 260, easing: 'cubic-bezier(.2,.7,.2,1)' });
     };
   }
 
@@ -632,7 +644,24 @@ ${hl}
   // ---------- 面板 ----------
   const chromeOpen = () => root.classList.contains('is-chrome');
   function toggleChrome(on = !chromeOpen()) { root.classList.toggle('is-chrome', on); if (on) clearSelection(); }
+  // 第一次用某个中文字体时，系统要把很大的字体文件读进来，正好赶上整章重排就会卡住。
+  // 打开设置时先在看不见的地方用这几种字体各排一小段本章的字，换字体时就快了。
+  let fontsWarm = false;
+  function warmFonts() {
+    const doc = frameDoc();
+    if (fontsWarm || !doc?.body) return;
+    fontsWarm = true;
+    const sample = (tmap.text || '').slice(0, 800) || '的一是在不了有和人这中大为上个国我以要他时来用们生到作地于出就分对成会可主发年动同工也能下过子说产种面而方后多定行学法所民得经十三之进着等部度家电力里如水化高自二理起小物现实加量都两体制机当使点从业本去把性好应开它合还因由其些然前外天政四日那社义事平形相全表间样与关各重新线内数正心反你明看原又么利比或但质气第向道命此变条只没结解问意建月公无系军很情者最立代想已通并提直题党程展五果料象员革位入常文总次品式活设及管特件长求老头基资边流路级少图山统接知较将组见计别她手角期根论运农指几九区强放决西被干做必战先回则任取据处府';
+    const box = doc.createElement('div');
+    box.setAttribute('aria-hidden', 'true');
+    box.style.cssText = 'position:absolute;left:-99999px;top:0;width:600px;visibility:hidden;pointer-events:none';
+    for (const f of Object.values(FONTS)) if (f.css) { const sp = doc.createElement('p'); sp.style.cssText = `font-family:${f.css}!important;margin:0`; sp.textContent = sample; box.append(sp); }
+    doc.body.append(box);
+    box.offsetHeight; // 立刻排一次，让浏览器去加载字体
+    setTimeout(() => box.remove(), 1500);
+  }
   function openPanel(panel) {
+    if (panel === sheet) (window.requestIdleCallback || setTimeout)(warmFonts);
     toggleChrome(false);
     clearSelection();
     for (const p of [toc, sheet, aiPanel, searchPanel]) p.hidden = p !== panel;
@@ -1396,7 +1425,7 @@ ${hl}
     if (tab === 'type') {
       body = [
         h('div.sheet-block', h('span.sheet-label', '阅读配色'),
-          h('div.chips', [['auto', { name: '跟随外观', bg: 'linear-gradient(135deg,#FBFAF5 50%,#15171C 50%)' }], ...Object.entries(PAPERS)].map(([k, p]) => h('button.chip' + (settings.paper === k ? '.is-on' : ''), {
+          h('div.chips', [['auto', { name: '跟随外观', bg: 'linear-gradient(135deg,#FBFAF5 0 50%,#15171C 50% 100%)' }], ...Object.entries(PAPERS)].map(([k, p]) => h('button.chip' + (settings.paper === k ? '.is-on' : ''), {
             type: 'button', 'aria-pressed': String(settings.paper === k), onclick: () => change({ paper: k }),
           }, h('span.chip-dot', { style: `background:${p.bg}` }), p.name)))),
         range('字体大小', 'fontSize', 12, 34, 1, (v) => `${v} px`),

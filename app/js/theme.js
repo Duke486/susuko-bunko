@@ -44,6 +44,12 @@ function oklchToRgb(L, C, h) {
     -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
   ];
 }
+/** 书脊用的颜色：在封面主色的基础上提一点浓度、把明暗收在中间，书架上才不会一片灰蒙蒙 */
+export function spineTone(hex) {
+  const { L, C, h } = hexToOklch(hex);
+  if (C < 0.035) return oklch(Math.min(0.78, Math.max(0.36, L)), C, h); // 本来就是黑白灰的封面不硬加颜色
+  return oklch(Math.min(0.74, Math.max(0.46, L)), Math.min(0.2, Math.max(0.12, C * 1.25)), h);
+}
 /** OKLCH → 十六进制；超出屏幕能显示的范围时逐步降低浓度 */
 export function oklch(L, C, h) {
   for (let c = C; c >= 0; c -= 0.005) {
@@ -105,6 +111,7 @@ export async function extractColor(source) {
     const hex = rgbToHex([data[i], data[i + 1], data[i + 2]]);
     const { L, C, h } = hexToOklch(hex);
     if (L < 0.18 || L > 0.96) continue;
+    if (L > 0.8 && C < 0.09 && h > 20 && h < 90) continue; // 浅肤色：插画封面里到处都是，取出来书脊就都是一个色
     if (C < 0.04) { grey = [grey[0] + data[i], grey[1] + data[i + 1], grey[2] + data[i + 2], grey[3] + 1]; continue; }
     const k = Math.floor(h / 15);
     const b = bins.get(k) || { n: 0, c: 0, r: 0, g: 0, bl: 0 };
@@ -113,7 +120,7 @@ export async function extractColor(source) {
   }
   let best = null, score = 0;
   for (const b of bins.values()) {
-    const s = b.n * (b.c / b.n) ** 1.5; // 又多又鲜艳的颜色优先
+    const s = b.n * (b.c / b.n) ** 2.2; // 鲜艳的颜色优先，哪怕面积小一点
     if (s > score) { score = s; best = b; }
   }
   if (best && best.n > 20) return rgbToHex([best.r / best.n, best.g / best.n, best.bl / best.n]);

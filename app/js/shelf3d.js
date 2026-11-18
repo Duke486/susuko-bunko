@@ -2,11 +2,11 @@
 // 正中间那本转过来正对你露出封面，两边的书侧着身露出书脊。可以拖、甩（带惯性）、滚轮、方向键，
 // 停下时自动对齐到一本书上，首尾相接循环。书脊颜色取自各自封面的主色。
 import { h } from './ui.js';
-import { extractColor, hexToOklch } from './theme.js';
+import { extractColor, hexToOklch, spineTone } from './theme.js';
 import { prefs } from './store.js';
 import { buildSpine, fitSpine } from './spine.js';
 
-const colorCache = prefs.get('spineColors', {});
+const colorCache = prefs.get('spineColors2', {});
 let saveTimer = null;
 function rememberColor(key, color) {
   colorCache[key] = color;
@@ -14,7 +14,7 @@ function rememberColor(key, color) {
   saveTimer = setTimeout(() => {
     const keys = Object.keys(colorCache);
     if (keys.length > 800) for (const k of keys.slice(0, keys.length - 800)) delete colorCache[k];
-    prefs.set('spineColors', colorCache);
+    prefs.set('spineColors2', colorCache);
   }, 500);
 }
 
@@ -60,7 +60,7 @@ export function mountShelf(host, items, opts) {
       const img = h('img', { src: url, alt: '', draggable: false });
       img.addEventListener('load', () => {
         b.front.firstChild.replaceWith(img);
-        if (!colorCache[it.colorKey]) extractColor(img).then((c) => { rememberColor(it.colorKey, c); paint(b.el, c); }).catch(() => {});
+        if (!colorCache[it.colorKey]) extractColor(img).then((c) => { c = spineTone(c); rememberColor(it.colorKey, c); paint(b.el, c); }).catch(() => {});
       }, { once: true });
     }).catch(() => {});
   }
@@ -77,6 +77,7 @@ export function mountShelf(host, items, opts) {
     root.style.setProperty('--cw', `${CW}px`);
     root.style.setProperty('--ch', `${CH}px`);
     root.style.setProperty('--t', `${T}px`);
+    root.style.setProperty('--spk', (T / 80).toFixed(4)); // 书脊内容按 80px 宽排好，再整体缩放到实际厚度
   }
 
   const wrap = (d) => { d = ((d % n) + n) % n; return d >= n / 2 ? d - n : d; };
@@ -90,7 +91,7 @@ export function mountShelf(host, items, opts) {
       if (a > reach) { el.style.display = 'none'; continue; }
       el.style.display = '';
       if (!books[i].fitted) { books[i].fitted = true; for (const sp of books[i].spines) fitSpine(sp.el); }
-      if (a < 3) loadCover(i);
+      if (a < 6) loadCover(i); // 近处几本取封面（侧面也要用封面的颜色）
       const t = Math.min(a, 1);
       const x = a <= 1 ? s * a * near : s * (near + (a - 1) * (T + 5 * K));
       const z = (a <= 1 ? -a * 70 : -70 - (a - 1) ** 1.25 * 16) * K; // 越往两边越往后退，摆成一道弧

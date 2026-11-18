@@ -74,9 +74,10 @@ export function buildSpine(spec, cls = '') {
 export function fitSpine(el) {
   const inner = el.querySelector('.sp-in'), title = el.querySelector('.sp-title');
   if (!inner || !title || !el.clientHeight || el.dataset.fitted) return;
+  // .sp-in 固定按 80px 宽排版（再整体缩放），所以这里量到的尺寸和书脊实际大小无关
   const fits = (fs) => {
     title.style.setProperty('--fs', `${fs}cqw`);
-    return inner.scrollHeight <= inner.clientHeight + 1 && title.scrollWidth <= el.clientWidth * 0.94 && title.scrollHeight <= title.clientHeight + 1;
+    return inner.scrollHeight <= inner.clientHeight + 1 && title.scrollWidth <= inner.clientWidth * 0.94 && title.scrollHeight <= title.clientHeight + 1;
   };
   let lo = 6, hi = 58;
   if (fits(hi)) lo = hi;
@@ -114,3 +115,4 @@ function buildMangaSpine(spec, cls) {
   const el = h('div.sp.is-manga' + (cls ? '.' + cls : '') + '.is-' + layout, h('div.sp-in', parts.filter(Boolean)), spec.reading && h('span.sp-ribbon'));
   return { el };
 }
+

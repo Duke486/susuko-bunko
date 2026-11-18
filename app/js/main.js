@@ -927,7 +927,7 @@ function editBook(id) {
         illustrator: illustrator.value.trim(), kind: book.format === 'cbz' ? 'manga' : 'novel', mark,
         label, publisher: publisher.value.trim(),
       });
-      const color = prefs.get('spineColors', {})[`${book.id}:${book.coverAt || 0}`];
+      const color = prefs.get('spineColors2', {})[`${book.id}:${book.coverAt || 0}`];
       spineHost.style.setProperty('--sc', color || `hsl(${fallbackHue(book.series || book.title)} 34% 52%)`);
       spineHost.classList.toggle('is-light', !!color && theme.hexToOklch(color).L > 0.68);
       spineHost.replaceChildren(sp.el);
