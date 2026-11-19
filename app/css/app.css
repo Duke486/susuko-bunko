@@ -1503,27 +1503,14 @@ html.is-desk .shell.is-mini .side-top { margin-top: 40px; }
 .reader-ghost { visibility: hidden; pointer-events: none; transition: none; }
 .curl-canvas { position: absolute; left: 0; top: 0; pointer-events: none; }
 .curl-canvas[hidden] { display: none; }
-.book-fx { position: absolute; inset: 0; pointer-events: none; display: none; }
+.book-fx { position: absolute; inset: 0; pointer-events: none; display: none; z-index: 1; }
 .reader.is-book .book-fx { display: block; }
 .book-fx > i { position: absolute; display: block; }
-.bf-grain { /* 纸的纤维和颗粒，加一点点四周发暗 */
-  inset: 0; opacity: .55; mix-blend-mode: multiply;
-  background:
-    radial-gradient(120% 90% at 50% 50%, transparent 62%, rgba(60, 40, 10, .07) 100%),
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .42 0 0 0 0 .36 0 0 0 0 .27 0 0 0 .5 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='600' height='600'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.012 .18' numOctaves='2' seed='7'/%3E%3CfeColorMatrix values='0 0 0 0 .5 0 0 0 0 .44 0 0 0 0 .34 0 0 0 .22 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23f)'/%3E%3C/svg%3E");
-}
-.reader[data-dark="true"] .bf-grain { mix-blend-mode: screen; opacity: .18; }
-/* 单页：左边是装订的一侧，淡淡的一道阴影 */
-.bf-gutter { left: 0; top: 0; bottom: 0; width: 34px; background: linear-gradient(90deg, rgba(0, 0, 0, .13), rgba(0, 0, 0, .04) 40%, transparent); }
-/* 双页：中间的书缝——两页向中间弯下去，越靠近越暗，中间一道最深 */
-.reader.is-spread .bf-gutter {
-  left: 50%; width: 150px; transform: translateX(-50%);
-  background: linear-gradient(90deg, transparent, rgba(0, 0, 0, .035) 25%, rgba(0, 0, 0, .12) 42%, rgba(0, 0, 0, .3) 49.6%, rgba(255, 255, 255, .12) 50%, rgba(0, 0, 0, .3) 50.4%, rgba(0, 0, 0, .12) 58%, rgba(0, 0, 0, .035) 75%, transparent);
-}
-.reader[data-dark="true"] .bf-gutter { opacity: .8; }
+/* 底部状态栏也铺上同样的纸纹，和书页连成一张纸 */
+.reader.is-book { background-image: var(--grain); background-size: 240px 240px, 600px 600px; }
+.reader.is-book .reader-foot { background: transparent; }
 /* 书边：一页页叠起来的纸边。左边是读过的，右边是没读的，厚度跟着进度变 */
-.bf-edge { top: 6px; bottom: 6px; }
+.bf-edge { top: calc(4px + var(--safe-t)); bottom: calc(4px + var(--safe-b)); }
 .bf-edge.is-l { left: 0; width: calc(3px + var(--read, 0) * 13px); display: none; }
 .reader.is-spread .bf-edge.is-l { display: block; }
 .bf-edge.is-r { right: 0; width: calc(3px + (1 - var(--read, 0)) * 13px); }
@@ -1547,7 +1534,10 @@ html.is-desk .shell.is-mini .side-top { margin-top: 40px; }
 .ol-search.field { border: 0; background: none; box-shadow: none; padding-left: 0; min-height: 40px; }
 .ol-account { margin-left: auto; }
 .ol-account .btn { gap: 6px; }
-.ol-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ol-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ol-filters { display: flex; flex-direction: column; gap: 8px; }
+.ol-filter { display: flex; align-items: baseline; gap: 12px; }
+.ol-filter-label { flex: none; width: 2.6em; font-size: 12.5px; color: var(--muted); }
 .tag-chip.is-on { background: var(--accent); color: #fff; border-color: transparent; }
 .tag-chip.is-tiny { font-size: 11.5px; padding: 1px 8px; }
 .ol-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 22px 18px; }
@@ -1609,3 +1599,5 @@ html.is-desk .shell.is-mini .side-top { margin-top: 40px; }
   .ol-cover.is-big { width: 96px; }
   .ol-vol { flex-wrap: wrap; }
 }
+/* 翻页时这几层单独合成，拖动时不用重画整页 */
+.reader-ghost, .curl-canvas { will-change: clip-path, transform; contain: strict; }

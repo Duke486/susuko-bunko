@@ -71,22 +71,23 @@ export function createCurl({ ghost, back = null, look }) {
 
   function draw() {
     const geo = geometry();
-    const { paper, dark } = look();
-    // ghost：没折起来的那部分纸（加上双页时另一边不动的那一页），减掉盖在上面的纸背
+    const { dark } = look();
+    // ghost：没折起来的那部分纸（双页时加上另一边不动的那一页）。纸背由上面的层盖住，所以不用从这里挖掉；
+    // 只有双页跨章节、没有纸背那一层时，才把纸背的位置挖空，让下面的新页透上来
     let d = pathOf(geo.unfolded);
     if (g.other) d += `M${g.other[0]} 0L${g.other[1]} 0L${g.other[1]} ${H}L${g.other[0]} ${H}Z`;
-    if (!geo.flat) d += pathOf(geo.flap);
-    ghost.style.clipPath = d ? `path(evenodd, "${d}")` : 'inset(50%)';
+    const hole = !geo.flat && !g.backPaper && !g.useBack;
+    ghost.style.clipPath = d ? (hole ? `path(evenodd, "${d}${pathOf(geo.flap)}")` : `path("${d}")`) : 'inset(50%)';
     // 双页的纸背：第三个书页显示翻过去以后的那一面。先沿书脊镜像、再沿折痕镜像，两次镜像合起来是一次旋转加平移
     if (g.useBack && back) {
       if (geo.flat || geo.folded.length < 3) back.style.clipPath = 'inset(50%)';
       else {
-        const mirror = (q) => ({ u: -q.u, v: q.v }); // 纸背上的点：先镜像到书脊另一侧
+        const mirror = (q) => ({ u: -q.u, v: q.v });
         back.style.clipPath = `path("${pathOf(geo.folded.map(mirror))}")`;
         const ns = { x: g.s * geo.n.u, y: geo.n.v }, Ms = toScreen(geo.M);
         const R11 = 1 - 2 * ns.x * ns.x, R12 = -2 * ns.x * ns.y, R22 = 1 - 2 * ns.y * ns.y;
         const md = Ms.x * ns.x + Ms.y * ns.y, tx = 2 * md * ns.x, ty = 2 * md * ns.y;
-        const bx = 2 * g.spineX; // 书脊镜像：x → 2·spineX − x
+        const bx = 2 * g.spineX;
         back.style.transform = `matrix(${-R11},${-R12},${R12},${R22},${R11 * bx + tx},${R12 * bx + ty})`;
       }
     }
@@ -94,57 +95,61 @@ export function createCurl({ ghost, back = null, look }) {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
     if (geo.flat || geo.folded.length < 3) return;
-    const k = dark ? 0.6 : 1;
-    const lift = Math.min(1, geo.dist / (g.w * 0.9)); // 翻得越开，阴影越重、越宽
-    const toward = (len, a = 0) => { // 折痕上一点，沿 n（指向原纸角）走 len
-      const p0 = toScreen(geo.M), p1 = toScreen({ u: geo.M.u + geo.n.u * len, v: geo.M.v + geo.n.v * len });
+    const k = dark ? 0.55 : 1;
+    const open = Math.min(1, geo.dist / g.w); // 翻开的程度：影子跟着变宽变淡
+    const grad = (from, len) => { // 从折痕出发，沿 n（指向原纸角，也就是露出新页的那一侧）走 len，len 为负就是往纸背那侧
+      const p0 = toScreen({ u: geo.M.u + geo.n.u * from, v: geo.M.v + geo.n.v * from });
+      const p1 = toScreen({ u: geo.M.u + geo.n.u * (from + len), v: geo.M.v + geo.n.v * (from + len) });
       return ctx.createLinearGradient(p0.x, p0.y, p1.x, p1.y);
     };
+    const fillClipped = (poly, style, evenoddOuter = false) => {
+      ctx.save(); ctx.beginPath();
+      if (evenoddOuter) { ctx.rect(-W, -H, W * 3, H * 3); tracePoly(poly); ctx.clip('evenodd'); } else { tracePoly(poly); ctx.clip(); }
+      ctx.fillStyle = style; ctx.fillRect(0, 0, W, H); ctx.restore();
+    };
 
-    // 1. 露出来的下一页上，靠折痕的地方被翻起的纸挡住光
-    ctx.save();
-    ctx.beginPath(); tracePoly(geo.folded); ctx.clip();
-    const sw = 18 + 46 * lift;
-    let gr = toward(sw);
-    gr.addColorStop(0, `rgba(0,0,0,${0.32 * k})`);
-    gr.addColorStop(0.35, `rgba(0,0,0,${0.12 * k})`);
+    // 光从左上方照下来。
+    // 1. 没翻起来的那部分纸，靠近折痕的地方正往上弯，背着光，稍微暗一点
+    let gr = grad(0, -(26 + 30 * open));
+    gr.addColorStop(0, `rgba(0,0,0,${0.13 * k})`); gr.addColorStop(1, 'rgba(0,0,0,0)');
+    fillClipped(geo.unfolded, gr);
+
+    // 2. 露出来的新页上，翻起来的纸投下的影子：贴着折痕最深、边缘清楚，往外很快变淡
+    const sw = 14 + 44 * open;
+    gr = grad(0, sw);
+    gr.addColorStop(0, `rgba(0,0,0,${0.42 * k})`);
+    gr.addColorStop(0.18, `rgba(0,0,0,${0.2 * k})`);
+    gr.addColorStop(0.55, `rgba(0,0,0,${0.06 * k})`);
     gr.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H);
-    ctx.restore();
+    fillClipped(geo.folded, gr);
 
-    // 2. 纸背投在没翻的纸上的影子（只画影子不画纸：把纸挪出画面，影子偏移回来）
-    const OFF = 20000;
+    // 3. 纸背投在下面纸上的影子：把纸背轮廓往右下错开几次叠出一圈软影（不用模糊滤镜，大窗口也不卡）
     ctx.save();
-    ctx.beginPath(); ctx.rect(0, 0, W, H); tracePoly(geo.flap); ctx.clip('evenodd');
-    ctx.shadowColor = `rgba(0,0,0,${0.38 * k})`;
-    ctx.shadowBlur = (10 + 16 * lift) * dpr;
-    ctx.shadowOffsetX = OFF * dpr;
-    ctx.beginPath(); tracePoly(geo.flap, -OFF); ctx.fillStyle = '#000'; ctx.fill();
-    ctx.restore();
-
-    // 3. 纸背：单页时是纸的背面；双页时是下一页，只罩一层弯曲的明暗
-    ctx.save();
-    ctx.beginPath(); tracePoly(geo.flap); ctx.clip();
-    if (g.backPaper) { ctx.fillStyle = paper; ctx.fillRect(0, 0, W, H); }
-    let far = 0;
-    for (const q of geo.flap) far = Math.max(far, -((q.u - geo.M.u) * geo.n.u + (q.v - geo.M.v) * geo.n.v));
-    far = Math.max(far, 1);
-    gr = toward(-far);
-    const a = g.backPaper ? 1 : 0.75;
-    gr.addColorStop(0, `rgba(0,0,0,${0.16 * k * a})`);
-    gr.addColorStop(Math.min(0.5, 14 / far), `rgba(255,255,255,${(dark ? 0.05 : 0.28) * a})`); // 折痕附近的高光
-    gr.addColorStop(Math.min(0.8, 60 / far), `rgba(0,0,0,${0.02 * a})`);
-    gr.addColorStop(1, `rgba(0,0,0,${0.1 * k * a})`);
-    ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H);
-    if (g.backPaper) { // 背面透出一点点正面的字的颜色，像真的纸
-      ctx.fillStyle = dark ? 'rgba(255,255,255,0.025)' : 'rgba(60,40,20,0.035)';
-      ctx.fillRect(0, 0, W, H);
+    ctx.beginPath(); ctx.rect(-W, -H, W * 3, H * 3); tracePoly(geo.flap); ctx.clip('evenodd');
+    for (const [off, a] of [[2, 0.1], [5, 0.06], [9, 0.035]]) {
+      ctx.beginPath();
+      geo.flap.forEach((q, i) => { const p = toScreen(q); if (i) ctx.lineTo(p.x + off * 0.6, p.y + off); else ctx.moveTo(p.x + off * 0.6, p.y + off); });
+      ctx.closePath(); ctx.fillStyle = `rgba(0,0,0,${a * k * (0.5 + open * 0.5)})`; ctx.fill();
     }
     ctx.restore();
 
-    // 4. 纸边细线
+    // 4. 纸背：单页时是纸的背面（纸色）；双页时纸背那一层已经在下面，只罩明暗
+    let far = 1;
+    for (const q of geo.flap) far = Math.max(far, -((q.u - geo.M.u) * geo.n.u + (q.v - geo.M.v) * geo.n.v));
+    if (g.backPaper) fillClipped(geo.flap, look().paper);
+    gr = grad(0, -far);
+    const stop = (x) => Math.min(0.95, x / far);
+    gr.addColorStop(0, `rgba(0,0,0,${0.22 * k})`);                      // 折痕：纸弯过来的地方最暗
+    gr.addColorStop(stop(4), `rgba(0,0,0,${0.06 * k})`);
+    gr.addColorStop(stop(12), `rgba(255,255,255,${dark ? 0.06 : 0.42})`); // 弯面朝着光，一道亮
+    gr.addColorStop(stop(40), `rgba(255,255,255,${dark ? 0.02 : 0.12})`);
+    gr.addColorStop(1, `rgba(0,0,0,${0.07 * k})`);                       // 纸边稍微压暗，看得出是一张纸
+    fillClipped(geo.flap, gr);
+    if (g.backPaper) fillClipped(geo.flap, dark ? 'rgba(255,255,255,0.02)' : 'rgba(80,60,30,0.03)');
+
+    // 5. 纸边一道很细的线
     ctx.beginPath(); tracePoly(geo.flap);
-    ctx.strokeStyle = `rgba(0,0,0,${0.14 * k})`; ctx.lineWidth = 0.8; ctx.stroke();
+    ctx.strokeStyle = `rgba(0,0,0,${0.12 * k})`; ctx.lineWidth = 0.6; ctx.stroke();
   }
 
   function size(w, h) {
@@ -171,14 +176,25 @@ export function createCurl({ ghost, back = null, look }) {
     dragStart(x, y, factor = 1.35) { drag = { start: toLocal(x, y), base: { ...P }, factor }; },
     dragTo(x, y) {
       if (!drag) return;
-      const q = toLocal(x, y);
-      P = constrain({ u: drag.base.u + (q.u - drag.start.u) * drag.factor, v: drag.base.v + (q.v - drag.start.v) * 0.55 });
-      draw();
+      drag.to = toLocal(x, y);
+      if (drag.raf) return; // 一帧只画一次
+      drag.raf = requestAnimationFrame(() => {
+        if (!drag) return;
+        drag.raf = 0;
+        const q = drag.to;
+        let u = drag.base.u + (q.u - drag.start.u) * drag.factor;
+        // 手指水平拖时纸角也会自然地抬起来一点，折痕斜着，看起来才像纸
+        const t = Math.min(1, Math.max(0, (C.u - u) / (2 * g.w)));
+        const lift = H * 0.09 * Math.sin(Math.PI * t) * (C.v > H / 2 ? -1 : 1);
+        P = constrain({ u, v: drag.base.v + (q.v - drag.start.v) * 0.55 + lift });
+        draw();
+      });
     },
     /** 已经翻过去多少：0 = 平放，1 = 完全翻过去 */
     turned() { return Math.min(1, Math.max(0, (C.u - P.u) / (2 * g.w))); },
     /** 自动翻到底（'done'）或者落回原位（'back'） */
     play(to, ms = 420) {
+      if (drag?.raf) cancelAnimationFrame(drag.raf);
       drag = null;
       const from = { ...P }, target = to === 'done' ? D : C;
       const remain = Math.abs(target.u - from.u) / (2 * g.w);
@@ -200,6 +216,7 @@ export function createCurl({ ghost, back = null, look }) {
     },
     end() {
       anim?.cancel?.();
+      if (drag?.raf) cancelAnimationFrame(drag.raf);
       active = false; drag = null;
       cv.hidden = true;
       ghost.style.visibility = '';

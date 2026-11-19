@@ -7,6 +7,14 @@ import { prefs, setProgress, saveMark, removeMark, marksOf, onChange, touchActiv
 import { h, icon, toast, dialog, menuButton, imageViewer, statusClock, fmtPercent } from './ui.js';
 import * as ai from './ai.js';
 
+// 纸张纹理：细颗粒 + 横向的纸纤维（SVG 噪点），浅色纸和深色纸各一套
+const GRAIN = (r, g, b, a1, a2) => [
+  `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 ${r} 0 0 0 0 ${g} 0 0 0 0 ${b} 0 0 0 ${a1} 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")`,
+  `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='600' height='600'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.012 .18' numOctaves='2' seed='7'/%3E%3CfeColorMatrix values='0 0 0 0 ${r} 0 0 0 0 ${g} 0 0 0 0 ${b} 0 0 0 ${a2} 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23f)'/%3E%3C/svg%3E")`,
+].join(',');
+export const GRAIN_LIGHT = GRAIN(0.42, 0.36, 0.27, 0.22, 0.12);
+export const GRAIN_DARK = GRAIN(1, 1, 1, 0.05, 0.03);
+
 export const PAPERS = {
   white: { name: '奶白', bg: '#FBFAF5', fg: '#22252E', accent: '#C2255C', dark: false },
   paper: { name: '羊皮纸', bg: '#F3EAD6', fg: '#3A3226', accent: '#A8324F', dark: false },
@@ -60,7 +68,7 @@ export async function open({ host, book, title = book.title, source, progress, o
   // 双页时翻起来那张纸的背面（就是下一页），单独一份，翻页时随折痕旋转
   const backPage = h('iframe.reader-frame.reader-ghost.reader-back', { sandbox: 'allow-same-origin', tabIndex: -1, 'aria-hidden': 'true', title: '' });
   // 纸质书效果：纸张纹理、双页中间的书缝、两侧一页页叠起来的书边
-  const bookFx = h('div.book-fx', { 'aria-hidden': 'true' }, h('i.bf-grain'), h('i.bf-gutter'), h('i.bf-edge.is-l'), h('i.bf-edge.is-r'));
+  const bookFx = h('div.book-fx', { 'aria-hidden': 'true' }, h('i.bf-edge.is-l'), h('i.bf-edge.is-r'));
   const touch = h('div.reader-touch');
   const selLayer = h('div.sel-layer', { hidden: true }); // 选字的两个拖柄和菜单
   const pageMark = h('span.page-mark', { hidden: true, 'aria-hidden': 'true' });
@@ -82,8 +90,9 @@ export async function open({ host, book, title = book.title, source, progress, o
   const markBtn = h('button.icon-btn', { type: 'button', onclick: toggleBookmark });
   const nightBtn = menuButton('moon', '夜间', toggleNight);
   const root = h('div.reader',
-    h('div.reader-stage', frame, ghost, backPage, bookFx, touch, selLayer, pageMark),
+    h('div.reader-stage', frame, ghost, backPage, touch, selLayer, pageMark),
     h('footer.reader-foot', clock.el, footCenter, footRight),
+    bookFx,
     h('header.reader-top',
       h('button.icon-btn', { type: 'button', 'aria-label': '返回书架', onclick: onExit }, icon('back')),
       h('div.reader-heading', h('span.reader-title', title), topSub, routeChip(book) || ''),
@@ -115,6 +124,7 @@ export async function open({ host, book, title = book.title, source, progress, o
     root.dataset.dark = String(p.dark);
     root.classList.toggle('is-scroll', isScroll());
     root.classList.toggle('is-book', !!settings.book && !isScroll());
+    root.style.setProperty('--grain', p.dark ? GRAIN_DARK : GRAIN_LIGHT);
     nightBtn.replaceChildren(icon(p.dark ? 'sun' : 'moon', 22), h('span', p.dark ? '日间' : '夜间'));
   }
   function toggleNight() {
@@ -167,6 +177,16 @@ ${text}}
 img,svg,video{max-width:100%!important;max-height:${H - padV * 2}px!important;object-fit:contain;break-inside:avoid!important}
 .shiori-nav{display:none!important}`;
     }
+    // 纸质书效果画在书页自己的背景上（固定在视口），翻页时纸纹和书缝跟着那张纸一起转，光影才对
+    let bookBg = '';
+    if (settings.book && !isScroll()) {
+      const k = p.dark ? 0.6 : 1, a = (x) => `rgba(0,0,0,${(x * k).toFixed(3)})`;
+      const gutter = cols === 2
+        ? `linear-gradient(90deg,transparent calc(50% - 80px),${a(0.03)} calc(50% - 40px),${a(0.1)} calc(50% - 14px),${a(0.26)} calc(50% - 1px),rgba(255,255,255,${p.dark ? 0.04 : 0.12}) 50%,${a(0.26)} calc(50% + 1px),${a(0.1)} calc(50% + 14px),${a(0.03)} calc(50% + 40px),transparent calc(50% + 80px))`
+        : `linear-gradient(90deg,${a(0.1)},${a(0.03)} 14px,transparent 36px)`;
+      const vignette = `radial-gradient(130% 100% at 50% 50%,transparent 60%,${p.dark ? 'rgba(0,0,0,.18)' : 'rgba(70,45,10,.07)'} 100%)`;
+      bookBg = `html{background-image:${gutter},${vignette},${p.dark ? GRAIN_DARK : GRAIN_LIGHT}!important;background-attachment:fixed!important;background-size:100% 100%,100% 100%,240px 240px,600px 600px!important;background-repeat:no-repeat,no-repeat,repeat,repeat!important}`;
+    }
     const custom = settings.paper === 'auto' ? p !== PAPERS.white : settings.paper !== 'white';
     const a = p.dark ? 0.32 : 0.42;
     const marker = settings.hlStyle === 'marker', wave = settings.hlStyle === 'wave';
@@ -178,6 +198,7 @@ img,svg,video{max-width:100%!important;max-height:${H - padV * 2}px!important;ob
       ? `text-decoration:underline dotted ${p.accent};text-decoration-thickness:2px;text-underline-offset:4px`
       : `background-color:color-mix(in srgb,${p.accent} ${p.dark ? 16 : 10}%,transparent)`;
     return `${layout}
+${bookBg}
 ${isVertical() ? '' : '*{writing-mode:horizontal-tb!important;text-combine-upright:none!important}'}
 p,li,dd,blockquote{line-height:inherit!important;orphans:1;widows:1}
 ${settings.para > 0 ? `p{margin-block:0 ${settings.para}px!important}` : ''}
@@ -1520,7 +1541,7 @@ ${hl}
     applyPaper();
     if ('turn' in patch) { if (curl.active) curl.end(); scheduleGhost(); }
     const layoutChanged = LAYOUT_KEYS.some((k) => k in patch && patch[k] !== before[k]);
-    const colorChanged = ('paper' in patch && patch.paper !== before.paper) || ('hlStyle' in patch && patch.hlStyle !== before.hlStyle);
+    const colorChanged = ('paper' in patch && patch.paper !== before.paper) || ('hlStyle' in patch && patch.hlStyle !== before.hlStyle) || ('book' in patch && patch.book !== before.book);
     if (layoutChanged || colorChanged) {
       if (!relayoutQueued) {
         relayoutQueued = true;

@@ -157,7 +157,7 @@ async function handle(req, res, seg, q, lib, { json, fail, readJson, save, str }
       const page = int(q.get('page'), 0, 0, 9999), size = int(q.get('pageSize'), 30, 1, 100);
       const query = str(q.get('query') || '', 100);
       const provider = /^[a-z,]+$/.test(q.get('provider') || '') ? q.get('provider') : PROVIDERS;
-      const type = int(q.get('type'), 0, 0, 3), sort = int(q.get('sort'), 0, 0, 3), translate = int(q.get('translate'), 0, 0, 3), level = int(q.get('level'), 1, 0, 2);
+      const type = int(q.get('type'), 0, 0, 3), sort = int(q.get('sort'), 0, 0, 2), translate = int(q.get('translate'), 0, 0, 2), level = int(q.get('level'), 1, 0, 2);
       const key = `n|${page}|${size}|${query}|${provider}|${type}|${sort}|${translate}|${level}|${!!account.token}`;
       const data = cached(key) || await call(account, `novel?page=${page}&pageSize=${size}&query=${enc(query)}&provider=${enc(provider)}&type=${type}&level=${level}&translate=${translate}&sort=${sort}`);
       remember(key, data);

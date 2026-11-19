@@ -3,13 +3,19 @@
 import { h, icon, loader, toast, dialog } from './ui.js';
 import * as store from './store.js';
 
-const LEVELS = [[0, '全部'], [1, '轻小说'], [2, '轻文学'], [3, '文学'], [4, '非小说']];
+// 分级、筛选和 Novelia 网站上的一致；R18 那几项要登录后才会出现
+const LEVELS = [[0, '全部'], [1, '轻小说'], [2, '轻文学'], [3, '文学'], [4, '非小说'], [5, 'R18男性向', true], [6, 'R18女性向', true]];
 const WEB_TYPES = [[0, '全部'], [1, '连载中'], [2, '已完结'], [3, '短篇']];
-const PROVIDER_NAMES = { kakuyomu: 'カクヨム', syosetu: '成为小说家吧', novelup: 'ノベルアップ+', hameln: 'ハーメルン', pixiv: 'Pixiv', alphapolis: 'アルファポリス' };
+const WEB_LEVELS = [[0, '全部', true], [1, '一般向'], [2, 'R18', true]];
+const WEB_TRANSLATE = [[0, '全部'], [1, 'GPT'], [2, 'Sakura']];
+const WEB_SORT = [[0, '更新'], [1, '点击'], [2, '相关']];
+const PROVIDERS = ['kakuyomu', 'syosetu', 'novelup', 'hameln', 'pixiv', 'alphapolis'];
+const PROVIDER_NAMES = { kakuyomu: 'Kakuyomu', syosetu: '成为小说家吧', novelup: 'Novelup', hameln: 'Hameln', pixiv: 'Pixiv', alphapolis: 'Alphapolis' };
 const TRANSLATOR_NAMES = { sakura: 'Sakura', gpt: 'GPT', youdao: '有道', baidu: '百度' };
 
 const st = {
   tab: store.prefs.get('onlineTab', 'wenku'), query: '', level: 0, type: 0,
+  providers: [...PROVIDERS], wlevel: null, translate: 0, sort: 0,
   items: [], page: 0, pages: 1, loading: false, error: '', token: 0, account: null,
 };
 
@@ -32,7 +38,34 @@ export function renderOnline(body, { importFiles }) {
     st.tab = v; store.prefs.set('onlineTab', v); st.items = []; st.token++; st.loading = false;
     io.disconnect(); renderOnline(body, ctx); // 两边的筛选条件不一样，整页重画
   } }, label);
-  const chips = (list, cur, set) => h('div.ol-chips', list.map(([v, label]) => h('button.tag-chip' + (cur === v ? '.is-on' : ''), { type: 'button', onclick: () => { set(v); draw(); reload(); } }, label)));
+  const signedIn = () => !!st.account?.signedIn;
+  // 一行筛选：点了立刻重画这一块（以前只改了数据没重画，要切出去再切回来才看得到高亮）
+  const row = (label, list, get, set) => h('div.ol-filter', h('span.ol-filter-label', label), h('div.ol-chips', list
+    .filter(([, , needLogin]) => !needLogin || signedIn())
+    .map(([v, text]) => h('button.tag-chip' + (get() === v ? '.is-on' : ''), {
+      type: 'button', 'aria-pressed': String(get() === v), onclick: () => { if (get() === v) return; set(v); drawFilters(); reload(); },
+    }, text))));
+  const filters = h('div.ol-filters');
+  function drawFilters() {
+    if (st.tab === 'wenku') {
+      if (!signedIn() && st.level >= 5) st.level = 0;
+      filters.replaceChildren(row('分级', LEVELS, () => st.level, (v) => { st.level = v; }));
+      return;
+    }
+    if (st.wlevel == null || (!signedIn() && st.wlevel !== 1)) st.wlevel = signedIn() ? 0 : 1;
+    const on = (p) => st.providers.includes(p);
+    filters.replaceChildren(
+      h('div.ol-filter', h('span.ol-filter-label', '来源'), h('div.ol-chips',
+        PROVIDERS.map((p) => h('button.tag-chip' + (on(p) ? '.is-on' : ''), {
+          type: 'button', 'aria-pressed': String(on(p)),
+          onclick: () => { st.providers = on(p) ? st.providers.filter((x) => x !== p) : [...st.providers, p]; if (!st.providers.length) st.providers = [p]; drawFilters(); reload(); },
+        }, PROVIDER_NAMES[p])),
+        h('button.icon-btn.is-small', { type: 'button', title: '反选来源', 'aria-label': '反选来源', onclick: () => { const inv = PROVIDERS.filter((p) => !on(p)); st.providers = inv.length ? inv : [...PROVIDERS]; drawFilters(); reload(); } }, icon('sync', 16)))),
+      row('类型', WEB_TYPES, () => st.type, (v) => { st.type = v; }),
+      row('分级', WEB_LEVELS, () => st.wlevel, (v) => { st.wlevel = v; }),
+      row('翻译', WEB_TRANSLATE, () => st.translate, (v) => { st.translate = v; }),
+      row('排序', WEB_SORT, () => st.sort, (v) => { st.sort = v; }));
+  }
   const acct = h('div.ol-account');
   const results = h('div.ol-results');
   const more = h('div.ol-more');
@@ -40,15 +73,12 @@ export function renderOnline(body, { importFiles }) {
     h('div.segmented.ol-tabs', { role: 'group', 'aria-label': '书库' }, tabBtn('wenku', '文库小说'), tabBtn('web', '网络小说')),
     h('form.ol-searchbox', { onsubmit: (e) => { e.preventDefault(); st.query = search.value.trim(); reload(); } }, icon('search', 18), search),
     acct);
-  const filters = st.tab === 'wenku'
-    ? chips(LEVELS, st.level, (v) => { st.level = v; })
-    : chips(WEB_TYPES, st.type, (v) => { st.type = v; });
   body.replaceChildren(head, filters, results, more, h('p.ol-credit', '内容来自 ', h('a', { href: 'https://n.novelia.cc', target: '_blank', rel: 'noopener' }, 'Novelia 轻小说机翻机器人'), '，译文是机器翻译。'));
 
   function drawAccount() {
     const a = st.account;
     acct.replaceChildren(a?.signedIn
-      ? h('button.btn.is-soft.is-small', { type: 'button', title: '退出 Novelia 账号', onclick: async () => { st.account = await store.novelia.logout().catch(() => ({ signedIn: false })); drawAccount(); reload(); } }, icon('user', 16), a.username || '已登录')
+      ? h('button.btn.is-soft.is-small', { type: 'button', title: '退出 Novelia 账号', onclick: async () => { st.account = await store.novelia.logout().catch(() => ({ signedIn: false })); drawAccount(); drawFilters(); reload(); } }, icon('user', 16), a.username || '已登录')
       : h('button.btn.is-soft.is-small', { type: 'button', onclick: loginDialog }, '登录 Novelia'));
   }
   async function loginDialog() {
@@ -68,7 +98,7 @@ export function renderOnline(body, { importFiles }) {
       u, p, msg,
       h('div.dialog-actions', h('button.btn', { type: 'button', onclick: () => close() }, '取消'), h('button.btn.is-primary', { type: 'submit' }, '登录')));
     });
-    drawAccount(); reload();
+    drawAccount(); drawFilters(); reload();
   }
 
   function draw() {
@@ -96,7 +126,7 @@ export function renderOnline(body, { importFiles }) {
     try {
       const data = st.tab === 'wenku'
         ? await store.novelia.wenku({ page, pageSize: 24, query: st.query, level: st.level })
-        : await store.novelia.web({ page, pageSize: 30, query: st.query, type: st.type });
+        : await store.novelia.web({ page, pageSize: 30, query: st.query, type: st.type, provider: st.providers.join(','), level: st.wlevel ?? 1, translate: st.translate, sort: st.sort });
       if (token !== st.token) return;
       st.items = page === 0 ? data.items : [...st.items, ...data.items];
       st.page = page + 1; st.pages = data.pages || 1;
@@ -112,8 +142,8 @@ export function renderOnline(body, { importFiles }) {
   const io = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting) && st.page < st.pages && st.items.length && !st.loading) loadMore(); }, { rootMargin: '400px' });
   io.observe(more);
 
-  draw(); drawAccount();
-  if (!st.account) store.novelia.status().then((a) => { st.account = a; drawAccount(); }).catch(() => {});
+  draw(); drawAccount(); drawFilters();
+  if (!st.account) store.novelia.status().then((a) => { st.account = a; drawAccount(); drawFilters(); }).catch(() => {});
   if (!st.items.length || st.lastTab !== st.tab) { st.lastTab = st.tab; reload(); }
 }
 
