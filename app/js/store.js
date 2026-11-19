@@ -772,6 +772,25 @@ export async function importBook(file, collectionIds = []) {
 
 /** 自动查作品资料（经自己的服务器去 Bangumi / AniList / DeepSeek 搜索） */
 export const metaLookup = (body) => apiJson('/api/meta/lookup', 'POST', body);
+// 在线书库（Novelia），都经自己的服务器转发
+const qs = (o) => new URLSearchParams(Object.entries(o).filter(([, v]) => v !== undefined && v !== null && v !== '')).toString();
+export const novelia = {
+  status: () => apiJson('/api/novelia/status', 'GET'),
+  login: (username, password) => apiJson('/api/novelia/login', 'POST', { username, password }),
+  logout: () => apiJson('/api/novelia/logout', 'POST', {}),
+  wenku: (q) => apiJson('/api/novelia/wenku?' + qs(q), 'GET'),
+  wenkuOne: (id) => apiJson('/api/novelia/wenku/' + encodeURIComponent(id), 'GET'),
+  web: (q) => apiJson('/api/novelia/novel?' + qs(q), 'GET'),
+  webOne: (provider, id) => apiJson(`/api/novelia/novel/${encodeURIComponent(provider)}/${encodeURIComponent(id)}`, 'GET'),
+  async file(q) {
+    const res = await api('/api/novelia/file?' + qs(q));
+    const blob = await res.blob();
+    let name = 'novelia.epub';
+    try { name = decodeURIComponent(res.headers.get('X-File-Name') || name); } catch { /* 用默认名 */ }
+    if (!/\.epub$/i.test(name)) name += '.epub';
+    return new File([blob], name, { type: 'application/epub+zip' });
+  },
+};
 
 // ---------- 百度网盘 ----------
 direct.useApi(apiJson);

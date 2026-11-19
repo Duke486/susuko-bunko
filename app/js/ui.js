@@ -21,6 +21,7 @@ export function h(spec, props, ...children) {
 
 const paths = {
   menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  globe: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.3 3.6 5.1 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.1-3.6-8.5s1.2-6.2 3.6-8.5z"/>',
   sidebar: '<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M9.5 4.5v15"/>',
   caret: '<path d="M10 7.5l5 4.5-5 4.5z" fill="currentColor" stroke-width="1.2"/>',
   openBook: '<path d="M12 6.5C10 5 7.2 4.5 4 4.8v13.4c3.2-.3 6 .2 8 1.8 2-1.6 4.8-2.1 8-1.8V4.8c-3.2-.3-6 .2-8 1.7zM12 6.5V20" fill="currentColor" fill-opacity=".18"/>',
@@ -157,6 +158,11 @@ export function fmtSize(bytes) {
   if (bytes > 1 << 30) return (bytes / (1 << 30)).toFixed(1) + ' GB';
   if (bytes > 1 << 20) return (bytes / (1 << 20)).toFixed(1) + ' MB';
   return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+}
+
+/** 加载动画：捧着书的小女孩（img/loader.png 是 12×8 帧的精灵图，用当前文字颜色描出来，深色、纸张颜色都合适） */
+export function loader(label = '正在加载') {
+  return h('span.loader', { role: 'status', 'aria-label': label }, h('span.ld-y', h('span.ld-x')));
 }
 
 /** 全屏看图：滚轮 / 双指缩放，拖动平移，双击放大，单击或 Esc 关闭 */

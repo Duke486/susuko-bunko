@@ -6,11 +6,15 @@ import android.speech.tts.UtteranceProgressListener
 import android.view.KeyEvent
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import androidx.activity.OnBackPressedCallback
 import java.util.Locale
 
 // 打包时由 .github/workflows/build.yml 复制到 gen/android 里，替换 Tauri 生成的 MainActivity。
 // 作用：1. 阅读时拦截音量键并通知网页翻页；不在阅读时音量键照常调音量。
 //      2. 安卓的网页视图不支持网页朗读接口，这里用系统的 TextToSpeech 帮网页朗读。
+//      3. 返回键先交给网页（window.__onBack）一层层往回退：弹窗 → 菜单 → 阅读器 → 侧栏 → 系列 → 全部；
+//         网页说没东西可退了才真正退出应用。Tauri 默认的做法是“网页能后退就后退，否则退出”，
+//         打开系列不产生网页历史，所以以前在系列里按返回会直接退出。
 class MainActivity : TauriActivity() {
   private var web: WebView? = null
   private var tts: TextToSpeech? = null
@@ -51,6 +55,10 @@ class MainActivity : TauriActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    // 手势返回（新版安卓的预测性返回）不一定走按键事件，这里再接一层；后加的回调优先于 Tauri 自己的
+    onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+      override fun handleOnBackPressed() { handleBack() }
+    })
     tts = TextToSpeech(this) { status ->
       ttsReady = status == TextToSpeech.SUCCESS
       tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
@@ -78,8 +86,28 @@ class MainActivity : TauriActivity() {
     webView.settings.textZoom = 100
   }
 
+  @Volatile private var backBusy = false
+
+  private fun handleBack() {
+    val w = web
+    if (w == null) { finish(); return }
+    if (backBusy) return // 上一次还没问完，连按的忽略
+    backBusy = true
+    w.evaluateJavascript("(function(){try{return window.__onBack&&window.__onBack()?'y':'n'}catch(e){return 'n'}})()") { r ->
+      backBusy = false
+      if (r != "\"y\"") {
+        if (w.canGoBack()) w.goBack() else finish()
+      }
+    }
+  }
+
   override fun dispatchKeyEvent(event: KeyEvent): Boolean {
     val code = event.keyCode
+    if (code == KeyEvent.KEYCODE_BACK) {
+      // 按下时只吃掉，抬起时再处理，和系统的返回习惯一致
+      if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) handleBack()
+      return true
+    }
     if (volumeKeysForPaging && (code == KeyEvent.KEYCODE_VOLUME_UP || code == KeyEvent.KEYCODE_VOLUME_DOWN)) {
       if (event.action == KeyEvent.ACTION_DOWN) {
         val dir = if (code == KeyEvent.KEYCODE_VOLUME_DOWN) "down" else "up"

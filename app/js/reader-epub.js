@@ -1,6 +1,7 @@
 // EPUB 阅读器。横排可左右翻页（CSS 多栏分页，宽屏双页）或上下滚动；竖排为从右往左翻页。
 // 长按文字可以选字：复制、划线、批注、查词、翻译、朗读。也可以从当前页开始听书。
 import { routeChip } from './cloud-direct.js';
+import { createCurl } from './pagecurl.js';
 import { Epub } from './epub.js';
 import { prefs, setProgress, saveMark, removeMark, marksOf, onChange, touchActivity } from './store.js';
 import { h, icon, toast, dialog, menuButton, imageViewer, statusClock, fmtPercent } from './ui.js';
@@ -22,7 +23,7 @@ const FONTS = {
 const DEFAULTS = {
   fontSize: 18, lineHeight: 1.8, marginPx: 24, para: 0, font: 'book', paper: 'auto',
   spread: true, flow: 'paged', writing: 'h', turn: 'rise', volumeKeys: true, hlColor: 'blue',
-  hlStyle: 'line', tapMode: 'lr', turnSpeed: 1, selUnit: 'word', autoSec: 30,
+  hlStyle: 'line', tapMode: 'lr', turnSpeed: 1, selUnit: 'word', autoSec: 30, book: false,
 };
 export function readerSettings() {
   const saved = prefs.get('reader', {});
@@ -42,10 +43,11 @@ export async function open({ host, book, title = book.title, source, progress, o
   const epub = await Epub.open(source);
   const settings = readerSettings();
   let index = 0, page = 0, pages = 1, W = 0, H = 0, loadToken = 0, destroyed = false, busy = false;
+  let spreadCols = 1, layoutGen = 0;
   const isVertical = () => settings.writing === 'v';
   const isScroll = () => settings.flow === 'scroll' && !isVertical();
   const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const turnStyle = () => (calm ? 'none' : settings.turn);
+  const turnStyle = () => (calm ? 'none' : settings.turn === 'curl' && (isVertical() || isScroll()) ? 'slide' : settings.turn);
   const paper = () => {
     if (settings.paper === 'auto') return document.documentElement.dataset.theme === 'dark' ? PAPERS.night : PAPERS.white;
     return PAPERS[settings.paper] || PAPERS.white;
@@ -53,6 +55,12 @@ export async function open({ host, book, title = book.title, source, progress, o
 
   // ---------- 结构 ----------
   const frame = h('iframe.reader-frame', { sandbox: 'allow-same-origin', title, tabIndex: -1 });
+  // 仿真翻页用的“幽灵页”：和书页内容一样，翻页时显示正在翻起来的那张纸
+  const ghost = h('iframe.reader-frame.reader-ghost', { sandbox: 'allow-same-origin', tabIndex: -1, 'aria-hidden': 'true', title: '' });
+  // 双页时翻起来那张纸的背面（就是下一页），单独一份，翻页时随折痕旋转
+  const backPage = h('iframe.reader-frame.reader-ghost.reader-back', { sandbox: 'allow-same-origin', tabIndex: -1, 'aria-hidden': 'true', title: '' });
+  // 纸质书效果：纸张纹理、双页中间的书缝、两侧一页页叠起来的书边
+  const bookFx = h('div.book-fx', { 'aria-hidden': 'true' }, h('i.bf-grain'), h('i.bf-gutter'), h('i.bf-edge.is-l'), h('i.bf-edge.is-r'));
   const touch = h('div.reader-touch');
   const selLayer = h('div.sel-layer', { hidden: true }); // 选字的两个拖柄和菜单
   const pageMark = h('span.page-mark', { hidden: true, 'aria-hidden': 'true' });
@@ -74,7 +82,7 @@ export async function open({ host, book, title = book.title, source, progress, o
   const markBtn = h('button.icon-btn', { type: 'button', onclick: toggleBookmark });
   const nightBtn = menuButton('moon', '夜间', toggleNight);
   const root = h('div.reader',
-    h('div.reader-stage', frame, touch, selLayer, pageMark),
+    h('div.reader-stage', frame, ghost, backPage, bookFx, touch, selLayer, pageMark),
     h('footer.reader-foot', clock.el, footCenter, footRight),
     h('header.reader-top',
       h('button.icon-btn', { type: 'button', 'aria-label': '返回书架', onclick: onExit }, icon('back')),
@@ -96,6 +104,7 @@ export async function open({ host, book, title = book.title, source, progress, o
         menuButton('type', '设置', () => openSheet('type')))),
     player, autoPill, scrim, toc, sheet, aiPanel, searchPanel);
   host.replaceChildren(root);
+  const curl = createCurl({ ghost, back: backPage, look: () => ({ paper: paper().bg, dark: paper().dark }) });
   applyPaper();
 
   function applyPaper() {
@@ -105,6 +114,7 @@ export async function open({ host, book, title = book.title, source, progress, o
     root.style.setProperty('--paper-accent', p.accent);
     root.dataset.dark = String(p.dark);
     root.classList.toggle('is-scroll', isScroll());
+    root.classList.toggle('is-book', !!settings.book && !isScroll());
     nightBtn.replaceChildren(icon(p.dark ? 'sun' : 'moon', 22), h('span', p.dark ? '日间' : '夜间'));
   }
   function toggleNight() {
@@ -119,6 +129,8 @@ export async function open({ host, book, title = book.title, source, progress, o
     H = Math.max(200, Math.floor(stage.clientHeight));
     const wide = W >= 700;
     const cols = !isScroll() && !isVertical() && settings.spread && W >= 1000 && W > H * 1.15 ? 2 : 1;
+    spreadCols = cols;
+    root?.classList.toggle('is-spread', cols === 2);
     let padH = Math.round(settings.marginPx * (wide ? 2 : 1));
     if (cols === 1 && !isVertical()) padH = Math.max(padH, Math.round((W - 780) / 2));
     const gap = padH * 2;
@@ -215,6 +227,7 @@ ${hl}
   function refresh(save = true) { // 更新页脚、进度条、书签标记，并记录进度
     const end = spanNow()[1];
     const percent = lastPercent = epub.percentAt(index, end);
+    root.style.setProperty('--read', percent.toFixed(3));
     const pct = `${Math.round(percent * 100)}%`;
     const where = isScroll() ? `本章 ${Math.round(end * 100)}%` : `${page + 1} / ${pages}`;
     footCenter.textContent = chapterTitle();
@@ -274,6 +287,87 @@ ${hl}
     seen.forEach((el, i) => riseAnims.push(el.animate([{ opacity: 0, transform: shift }, { opacity: 1, transform: 'none' }],
       { duration: 340 * k, delay: Math.min(i, 12) * 32 * k, easing: 'cubic-bezier(.2,.7,.2,1)', fill: 'backwards' })));
   }
+  // ---------- 仿真翻页 ----------
+  // 幽灵页是当前这一章的一份拷贝（含排版样式），换章、重排、窗口大小变了都要重新拷一次
+  const ghostState = { key: '', ready: '', backReady: '', url: null };
+  const curlWanted = () => turnStyle() === 'curl' && !isScroll() && !isVertical();
+  const ghostKeyNow = () => `${index}|${W}x${H}|${layoutGen}`;
+  const ghostReady = () => curlWanted() && ghostState.ready === ghostKeyNow() && !curl.active;
+  function prepareGhost() {
+    if (!curlWanted() || busy || destroyed || curl.active) return;
+    const key = ghostKeyNow();
+    if (ghostState.key === key) return;
+    const doc = frameDoc();
+    if (!doc?.documentElement) return;
+    ghostState.key = key; ghostState.ready = '';
+    const xml = doc.contentType === 'application/xhtml+xml';
+    const text = xml ? new XMLSerializer().serializeToString(doc) : '<!DOCTYPE html>' + doc.documentElement.outerHTML;
+    if (ghostState.url) URL.revokeObjectURL(ghostState.url);
+    const url = ghostState.url = URL.createObjectURL(new Blob([text], { type: xml ? 'application/xhtml+xml' : 'text/html' }));
+    const into = (el, flag) => {
+      el.onload = async () => {
+        try { await el.contentDocument?.fonts?.ready; } catch { /* 忽略 */ }
+        if (ghostState.key === key && url === ghostState.url) ghostState[flag] = key;
+      };
+      if (el.contentWindow && el.src) el.contentWindow.location.replace(url); else el.src = url;
+    };
+    into(ghost, 'ready');
+    if (spreadCols === 2) into(backPage, 'backReady'); else ghostState.backReady = '';
+  }
+  const scheduleGhost = () => { if (curlWanted()) (window.requestIdleCallback || setTimeout)(() => prepareGhost(), { timeout: 600 }); };
+  const ghostTo = (p) => ghost.contentWindow?.scrollTo(p * W, 0);
+  const backTo = (p) => backPage.contentWindow?.scrollTo(p * W, 0);
+  const backReady = () => spreadCols === 2 && ghostState.backReady === ghostKeyNow();
+  /** 正在翻的那张纸：单页时整页（书脊在左）；双页往后翻是右半边，往前翻是左半边（镜像） */
+  function curlGeom(forward, to, sameChapter = true) {
+    if (spreadCols === 2) {
+      const useBack = sameChapter && backReady();
+      if (useBack) backTo(to);
+      return forward
+        ? { spineX: W / 2, s: 1, w: W / 2, other: [0, W / 2], backPaper: false, useBack }
+        : { spineX: W / 2, s: -1, w: W / 2, other: [W / 2, W], backPaper: false, useBack };
+    }
+    return { spineX: 0, s: 1, w: W, other: null, backPaper: true };
+  }
+  const curlMs = () => 520 * speed();
+  /** 点按、键盘、音量键翻页：自动翻过去。单页往前翻是把上一页“盖回来”，所以幽灵页显示目标页 */
+  let curlSeq = 0;
+  async function curlTurn(from, to) {
+    const seq = ++curlSeq;
+    const forward = to > from, reverse = !forward && spreadCols === 1;
+    if (reverse) { ghostTo(to); frameWin()?.scrollTo(from * W, 0); } else { ghostTo(from); frameWin()?.scrollTo(to * W, 0); }
+    curl.begin(W, H, curlGeom(forward, to), { fromDone: reverse });
+    const done = await curl.play(reverse ? 'back' : 'done', curlMs());
+    if (seq !== curlSeq) return; // 被下一次翻页打断了，后面的事交给下一次
+    if (reverse) frameWin()?.scrollTo(page * W, 0);
+    curl.end();
+  }
+  /** 拖动翻页：dir = 1 往后、-1 往前；返回 false 表示这次不能用仿真翻页 */
+  function curlDragBegin(dir, x, y) {
+    if (!ghostReady()) return false;
+    const to = page + dir;
+    if (to < 0 || to > pages - 1) return false;
+    const reverse = dir < 0 && spreadCols === 1;
+    if (reverse) ghostTo(to); else { ghostTo(page); frameWin()?.scrollTo(to * W, 0); }
+    curl.begin(W, H, curlGeom(dir > 0, to), { top: y < H * 0.4, fromDone: reverse });
+    curl.dragStart(x, y, reverse ? 1.6 : 1.35);
+    curlDrag = { dir, to, reverse };
+    return true;
+  }
+  let curlDrag = null;
+  async function curlDragEnd(fling) {
+    const d = curlDrag; curlDrag = null;
+    if (!d) return;
+    const turned = curl.turned();
+    // 单页往前翻是从“已翻过去”往回盖，所以判断要反过来
+    const commit = d.reverse ? (turned < 0.78 || fling) : (turned > 0.18 || fling);
+    const ok = await curl.play(d.reverse ? (commit ? 'back' : 'done') : (commit ? 'done' : 'back'), curlMs() * 0.8);
+    curl.end();
+    if (commit && ok) { buzz(); show(d.to, true, false); }
+    else frameWin()?.scrollTo(page * W, 0);
+    scheduleGhost();
+  }
+
   function buzz() { if (settings.haptic) try { navigator.vibrate?.(7); } catch { /* 不支持就算了 */ } }
   function show(p, save = true, animate = false) {
     const before = page;
@@ -281,7 +375,11 @@ ${hl}
     const style = animate && page !== before ? turnStyle() : 'none';
     const dir = page > before ? 1 : -1;
     if (animate && page !== before) buzz();
-    if (isVertical()) {
+    if (style === 'curl' && curl.active && !curlDrag) { curlSeq++; curl.end(); } // 上一次还没翻完就又翻：直接翻完
+    if (style === 'curl' && Math.abs(page - before) === 1 && ghostReady()) {
+      slideToken++;
+      curlTurn(before, page);
+    } else if (isVertical()) {
       frameWin()?.scrollTo(0, page * H);
       if (style === 'rise') riseIn(-dir);
       else if (style === 'slide' || style === 'float') floatIn(-dir); // 竖排从右往左翻：下一页从左边进来
@@ -515,11 +613,12 @@ ${hl}
   }
 
   /** where: { fraction } | { hash } | { offset } | { last: true }；dir 是换章方向，决定动画从哪边进来 */
-  async function load(i, where = {}, save = true, dir = 0) {
+  async function load(i, where = {}, save = true, dir = 0, quiet = false) {
     const token = ++loadToken;
     busy = true;
     clearSelection();
-    frame.style.visibility = 'hidden';
+    if (!quiet) frame.style.visibility = 'hidden'; // 仿真翻页换章时，上面盖着幽灵页，书页不用藏
+    layoutGen++;
     try {
       const url = await epub.chapter(i, buildCss());
       if (token !== loadToken || destroyed) return;
@@ -561,8 +660,9 @@ ${hl}
     } finally {
       if (token === loadToken) {
         frame.style.visibility = ''; busy = false;
-        const style = turnStyle();
+        const style = quiet ? 'none' : turnStyle() === 'curl' ? 'fade' : turnStyle();
         if (dir) buzz();
+        scheduleGhost();
         if (style === 'rise') riseIn(isScroll() ? 0 : dir * (isVertical() ? -1 : 1));
         else if (style === 'float') floatIn(isScroll() ? 0 : dir * (isVertical() ? -1 : 1), 1.4);
         else if (style !== 'none') {
@@ -598,10 +698,12 @@ ${hl}
     const fraction = fractionNow();
     const apply = () => {
       style.textContent = buildCss();
+      layoutGen++;
       frameWin().scrollTo(0, 0);
       measure();
       if (anchor != null && tmap.total) show(pageOfOffset(anchor), false); else goFraction(fraction);
       paintHighlights();
+      scheduleGhost();
     };
     if (!animated || calm) { apply(); return; }
     // 只用透明度过渡：给整页加模糊滤镜很吃性能，换字体这种要整章重排的操作会因此卡一下
@@ -627,8 +729,21 @@ ${hl}
       return;
     }
     if (page < pages - 1) show(page + 1, true, true);
-    else if (index < epub.spine.length - 1) load(index + 1, {}, true, 1);
-    else { show(page, false); toast('已经是最后一页了'); }
+    else if (index < epub.spine.length - 1) {
+      if (turnStyle() === 'curl' && ghostReady()) curlIntoNext(); else load(index + 1, {}, true, 1);
+    } else { show(page, false); toast('已经是最后一页了'); }
+  }
+  /** 翻到下一章：先让幽灵页盖住这一页，下面悄悄换章，换好了再把这张纸翻过去 */
+  async function curlIntoNext() {
+    const seq = ++curlSeq;
+    ghostTo(page);
+    curl.begin(W, H, curlGeom(true, 0, false));
+    await load(index + 1, {}, true, 0, true);
+    if (seq !== curlSeq || destroyed) { if (curl.active && seq === curlSeq) curl.end(); return; }
+    buzz();
+    await curl.play('done', curlMs());
+    if (seq === curlSeq) curl.end();
+    scheduleGhost();
   }
   function prev() {
     if (busy) return;
@@ -1153,8 +1268,16 @@ ${hl}
     if (!down || busy) return;
     if (down.selecting) { extendSelectionTo(...local(e.clientX, e.clientY)); return; }
     const dx = e.clientX - down.x, dy = e.clientY - down.y;
-    if (!down.dragging && Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) { down.dragging = true; clearTimeout(pressTimer); slideToken++; clearSelection(); }
-    else if (Math.abs(dy) > 10) clearTimeout(pressTimer);
+    if (!down.dragging && Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) {
+      down.dragging = true; clearTimeout(pressTimer); slideToken++; clearSelection();
+      // 仿真翻页：纸角跟着手指走（章节首尾这一下翻不了，松手时照常换章）
+      if (curlWanted()) {
+        if (curl.active && !curlDrag) { curlSeq++; curl.end(); frameWin()?.scrollTo(page * W, 0); }
+        const [lx, ly] = local(down.x, down.y);
+        down.curl = curlDragBegin(dx < 0 ? 1 : -1, lx, ly);
+      }
+    } else if (Math.abs(dy) > 10) clearTimeout(pressTimer);
+    if (down.curl) { curl.dragTo(...local(e.clientX, e.clientY)); return; }
     if (down.dragging && turnStyle() === 'slide' && !isVertical()) { // 书页跟着手指走
       const max = (pages - 1) * W;
       frameWin().scrollTo(Math.min(max, Math.max(0, page * W - dx)), 0);
@@ -1167,6 +1290,7 @@ ${hl}
     down = null;
     if (d.selecting) { if (sel) { delete sel.anchor; drawSelection(); } return; }
     const dx = e.clientX - d.x, dy = e.clientY - d.y, quick = Date.now() - d.t < 300;
+    if (d.curl) { toggleChrome(false); curlDragEnd(quick && Math.abs(dx) > 30); return; }
     if (d.dragging) {
       toggleChrome(false);
       // 手指往左拖 = 把右边的内容拉进来；竖排时右边是上一页
@@ -1177,7 +1301,11 @@ ${hl}
     if (Math.abs(dx) + Math.abs(dy) > 12) return;
     tapAt(...local(e.clientX, e.clientY), hitAt(e.clientX, e.clientY));
   });
-  touch.addEventListener('pointercancel', () => { clearTimeout(pressTimer); if (down?.dragging) show(page, false); down = null; });
+  touch.addEventListener('pointercancel', () => {
+    clearTimeout(pressTimer);
+    if (down?.curl) curlDragEnd(false); else if (down?.dragging) show(page, false);
+    down = null;
+  });
   touch.addEventListener('dblclick', (e) => { // 电脑上：双击插画放大，双击文字选词
     const src = imageOf(hitAt(e.clientX, e.clientY));
     if (src) { toggleChrome(false); imageViewer(src); return; }
@@ -1390,6 +1518,7 @@ ${hl}
     Object.assign(settings, patch);
     prefs.set('reader', settings);
     applyPaper();
+    if ('turn' in patch) { if (curl.active) curl.end(); scheduleGhost(); }
     const layoutChanged = LAYOUT_KEYS.some((k) => k in patch && patch[k] !== before[k]);
     const colorChanged = ('paper' in patch && patch.paper !== before.paper) || ('hlStyle' in patch && patch.hlStyle !== before.hlStyle);
     if (layoutChanged || colorChanged) {
@@ -1443,7 +1572,9 @@ ${hl}
       body = [
         seg('文字方向', 'writing', [['h', '横排'], ['v', '竖排']]),
         !isVertical() && seg('阅读方式', 'flow', [['paged', '左右翻页'], ['scroll', '上下滚动']]),
-        !isScroll() && seg('翻页动画', 'turn', [['rise', '逐段浮现'], ['float', '浮现'], ['slide', '滑动'], ['none', '无']]),
+        !isScroll() && seg('翻页动画', 'turn', [['curl', '仿真'], ['rise', '逐段浮现'], ['float', '浮现'], ['slide', '滑动'], ['none', '无']]),
+        !isScroll() && settings.turn === 'curl' && isVertical() && h('p.sheet-hint', '竖排时仿真翻页暂时用滑动代替'),
+        !isScroll() && seg('纸质书效果', 'book', [[true, '开'], [false, '关']]),
         !isScroll() && settings.turn !== 'none' && seg('动画速度', 'turnSpeed', [[1.5, '舒缓'], [1, '标准'], [0.6, '利落']]),
         !isScroll() && seg('点屏幕两侧', 'tapMode', [['lr', '左右分别翻'], ['next', '都是下一页']]),
         seg('划线样式', 'hlStyle', [['line', '直线'], ['wave', '波浪线'], ['marker', '荧光笔']]),
@@ -1500,6 +1631,7 @@ ${hl}
       stopTts(); stopAuto(); search.token++;
       aiAbort?.abort();
       observer.disconnect(); themeWatch.disconnect(); unsubscribe(); clock.stop();
+      curl.end(); if (ghostState.url) URL.revokeObjectURL(ghostState.url);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('volumekey', onVolume);
       syncVolumeKeys(false);

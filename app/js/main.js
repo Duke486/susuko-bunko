@@ -1,13 +1,14 @@
 // 书架、详情、摘录、统计、设置、登录与路由。
 import * as store from './store.js';
 import { state, prefs } from './store.js';
-import { h, icon, toast, dialog, confirmDialog, promptDialog, dropdown, fmtPercent, fmtSize, fmtDuration } from './ui.js';
+import { h, icon, loader, toast, dialog, confirmDialog, promptDialog, dropdown, fmtPercent, fmtSize, fmtDuration } from './ui.js';
 import * as ai from './ai.js';
 import * as theme from './theme.js';
 import { mountShelf } from './shelf3d.js';
 import { labelOf, labelById, matchLabel, searchLabels, logoUrl } from './labels.js';
 import { buildSpine, fitSpine } from './spine.js';
 import { mountWinbar } from './winbar.js';
+import { renderOnline } from './online.js';
 
 // 0.6 起立体书架是默认的书架视图（旧的“书脊”视图并入了它）
 if (prefs.get('layout') === 'spine' || !prefs.get('layoutV')) { prefs.set('layout', 'shelf'); prefs.set('layoutV', 1); }
@@ -143,7 +144,7 @@ let els = null;
 const coverCache = new Map(); // 已解析好的封面地址，避免重绘闪烁
 const isSeries = (filter) => filter.startsWith('series:');
 const isTag = (filter) => filter.startsWith('tag:');
-const PAGES = ['stats', 'excerpts', 'settings', 'tags'];
+const PAGES = ['stats', 'excerpts', 'settings', 'tags', 'online'];
 /** 所有标签和用到它的书的数量（同系列多卷只算一次，免得一套 30 卷的书把标签数撑得很大） */
 function allTags() {
   const count = new Map();
@@ -171,7 +172,7 @@ function booksIn(filter) {
 function filterName(filter) {
   if (isSeries(filter)) return filter.slice(7);
   if (isTag(filter)) return '#' + filter.slice(4);
-  return { all: '全部', reading: '在读', finished: '已读完', none: '未分类', stats: '阅读统计', excerpts: '摘录与批注', settings: '设置', tags: '标签' }[filter]
+  return { all: '全部', reading: '在读', finished: '已读完', none: '未分类', stats: '阅读统计', excerpts: '摘录与批注', settings: '设置', tags: '标签', online: '在线书库' }[filter]
     || state.collections[filter]?.name || '全部';
 }
 function openSeries(name) {
@@ -285,7 +286,7 @@ function renderAll() {
   renderNav(); renderMe(); renderHeading(); renderTools(); renderIntro(); renderBody(); renderBar(); renderPill(); renderDetail();
 }
 
-const NAV_COLORS = { all: '#3B82F6', reading: '#F59E0B', finished: '#10B981', none: '#8B5CF6', collection: '#EAB308', excerpts: '#14B8A6', stats: '#EC4899', settings: '#64748B', tag: '#8B7BD8' };
+const NAV_COLORS = { online: '#0EA5E9', all: '#3B82F6', reading: '#F59E0B', finished: '#10B981', none: '#8B5CF6', collection: '#EAB308', excerpts: '#14B8A6', stats: '#EC4899', settings: '#64748B', tag: '#8B7BD8' };
 function renderNav() {
   const active = isSeries(view.filter) ? view.back || 'all' : view.filter;
   const item = (filter, iconName, label, color, count) => h('button.nav-item' + (active === filter ? '.is-active' : '') + (filter.startsWith('tag') ? '.is-tag' : ''), {
@@ -297,6 +298,7 @@ function renderNav() {
     item('reading', 'clock', '在读', NAV_COLORS.reading, booksIn('reading').length),
     item('finished', 'check', '已读完', NAV_COLORS.finished, booksIn('finished').length),
     item('none', 'inbox', '未分类', NAV_COLORS.none, booksIn('none').length),
+    item('online', 'globe', '在线书库', NAV_COLORS.online),
     h('div.nav-section', h('span', '合集'),
       h('button.icon-btn.is-small', { type: 'button', 'aria-label': '新建合集', title: '新建合集', onclick: newCollection }, icon('plus', 16))),
     ...store.sortedCollections().map((c) => item(c.id, 'folder', c.name, NAV_COLORS.collection, booksIn(c.id).length)),
@@ -448,6 +450,7 @@ function renderBody() {
   if (f === 'excerpts') return renderExcerpts();
   if (f === 'settings') return renderSettings();
   if (f === 'tags') return renderTagCloud();
+  if (f === 'online') return renderOnline(els.body, { importFiles });
   const list = visibleBooks();
   if (!list.length) return renderEmpty();
   if (view.layout === 'list') return renderList(list);
@@ -733,6 +736,13 @@ function renderPill() {
     h('span.pill-ring', { style: `--p:${Math.min(1, p)}` }, icon('play', 16)),
     h('span.pill-fab', { 'aria-hidden': 'true' }, icon('openBook', 26)));
   els.pill.setAttribute('aria-label', `继续阅读《${bookLabel(b)}》`);
+  els.pill.style.setProperty('--p', Math.min(1, p));
+}
+/** 手机上右下角的样子：封面圆钮（默认）/ 图标圆钮 / 横条 */
+const FAB_STYLES = [['cover', '封面圆钮'], ['icon', '图标圆钮'], ['bar', '横条']];
+function applyFabStyle() {
+  const v = prefs.get('fab', 'cover');
+  for (const [k] of FAB_STYLES) document.body.classList.toggle('fab-' + k, k === v);
 }
 
 // ---------- 图书详情 ----------
@@ -1556,7 +1566,10 @@ function settingsLook() {
     row('界面主题', segOf('界面主题', [['auto', '跟随系统'], ['light', '浅色'], ['dark', '深色']], prefs.get('theme', 'auto'), (v) => { prefs.set('theme', v); applyTheme(); redraw(); })),
     row('书架的查看方式', segOf('查看方式', [['shelf', '立体书架'], ['grid', '封面'], ['list', '列表']], view.layout, (v) => { view.layout = v; prefs.set('layout', v); redraw(); })),
     row('同系列的书叠成一本', segOf('叠放', [[true, '开'], [false, '关']], prefs.get('stack', true), (v) => { prefs.set('stack', v); redraw(); })),
-    row('继续阅读浮条', segOf('浮条', [[true, '显示'], [false, '隐藏']], prefs.get('pill', true), (v) => { prefs.set('pill', v); document.body.classList.toggle('no-pill', !v); redraw(); }), '书架底部显示上次读到的书'))];
+    row('继续阅读浮条', segOf('浮条', [[true, '显示'], [false, '隐藏']], prefs.get('pill', true), (v) => { prefs.set('pill', v); document.body.classList.toggle('no-pill', !v); redraw(); }), '书架底部显示上次读到的书'),
+    (matchMedia('(max-width: 760px)').matches || /Android|iPhone/i.test(navigator.userAgent)) && prefs.get('pill', true)
+      ? row('手机上的样子', segOf('手机上的样子', FAB_STYLES, prefs.get('fab', 'cover'), (v) => { prefs.set('fab', v); applyFabStyle(); redraw(); }), '封面圆钮：书的封面外面一圈是读到的进度；横条：和电脑上一样，带书名')
+      : null)];
 }
 
 // 主题色：预设、自选、图片取色、跟随在读的书
@@ -1970,22 +1983,40 @@ async function openBaiduBrowser() {
   }, { wide: true });
 }
 
-async function importFiles(files) {
+/** meta：从在线书库来的资料（系列、作者、标签、简介、原名），导入后补到书上 */
+async function importFiles(files, meta = null) {
   files = files.filter((f) => /\.(epub|cbz|zip)$/i.test(f.name));
-  if (!files.length) { toast('只支持 EPUB 和 CBZ / ZIP 文件', { error: true }); return; }
+  if (!files.length) { toast('只支持 EPUB 和 CBZ / ZIP 文件', { error: true }); return []; }
   const into = state.collections[view.filter] ? [view.filter] : [];
   const t = toast('', { sticky: true });
-  let ok = 0, dup = 0; const failed = [];
+  let ok = 0, dup = 0; const failed = [], added = [];
   for (const [i, file] of files.entries()) {
     t.update(`正在导入 ${i + 1} / ${files.length}：${file.name}`);
-    try { const r = await store.importBook(file, into); if (r.duplicate) dup++; else ok++; }
-    catch (e) { failed.push(`${file.name}（${e.message}）`); }
+    try {
+      const r = await store.importBook(file, into);
+      if (r.duplicate) dup++; else { ok++; added.push(r.book.id); }
+      if (meta && !r.duplicate) await store.updateBook(r.book.id, onlinePatch(r.book, meta)).catch(() => {});
+    } catch (e) { failed.push(`${file.name}（${e.message}）`); }
   }
   const parts = [];
   if (ok) parts.push(`已导入 ${ok} 本`);
   if (dup) parts.push(`${dup} 本已在书架上`);
   if (failed.length) parts.push(`失败：${failed.join('；')}`);
   t.done(parts.join('，'), !!failed.length);
+  return added;
+}
+function onlinePatch(book, meta) {
+  const patch = {};
+  const fill = (k, v) => { if (v && !book[k]) patch[k] = v; };
+  if (meta.series) {
+    patch.series = meta.series;
+    const m = /([0-9０-９]+(?:\.[0-9]+)?)\s*[卷巻册集]?\s*[)）】\]]?\s*$/.exec(meta.title || '');
+    if (m) patch.volume = Number(m[1].replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)));
+  }
+  fill('author', meta.author); fill('illustrator', meta.illustrator); fill('publisher', meta.publisher);
+  fill('description', meta.description); fill('originalTitle', meta.originalTitle);
+  if (meta.tags?.length) patch.tags = [...new Set([...(book.tags || []), ...meta.tags])].slice(0, 20);
+  return patch;
 }
 let dragDepth = 0;
 window.addEventListener('dragenter', (e) => {
@@ -1999,6 +2030,26 @@ window.addEventListener('drop', (e) => {
   e.preventDefault(); dragDepth = 0; document.body.classList.remove('is-dragging');
   if (els && readerHost.hidden) importFiles([...e.dataTransfer.files]);
 });
+
+// ---------- 安卓返回键 ----------
+// 原生层（MainActivity）按下返回键时先问这里：一层层往回退，退到“全部”还没东西可关才返回 false，让应用退出。
+function pressEscape() { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); }
+window.__onBack = () => {
+  try {
+    const dlg = [...document.querySelectorAll('dialog[open]')].pop();
+    if (dlg) { if (dlg.dispatchEvent(new Event('cancel', { cancelable: true }))) dlg.close(); return true; }
+    if (document.querySelector('.viewer, .pop-menu, .dropdown-btn[aria-expanded=true]')) { pressEscape(); return true; }
+    if (!readerHost.hidden) { pressEscape(); return true; } // 阅读器自己按层处理：选区 → 面板 → 菜单 → 退出阅读
+    if (document.body.classList.contains('nav-open')) { setDrawer(false); return true; }
+    if (!els) return false;
+    if (view.selecting) { exitSelect(); return true; }
+    if (view.query) { view.query = ''; els.searchBox.classList.remove('is-open'); els.search.value = ''; renderBody(); return true; }
+    if (view.detail) { hideDetail(); return true; }
+    if (isSeries(view.filter)) { setFilter(view.back && !isSeries(view.back) ? view.back : 'all', true); return true; }
+    if (view.filter !== 'all') { setFilter('all'); return true; }
+  } catch (err) { console.error(err); }
+  return false;
+};
 
 // ---------- 阅读器路由 ----------
 // #/read/<书> 打开书；#/read/<书>/<记号> 打开并跳到某条划线 / 书签
@@ -2026,10 +2077,10 @@ async function route() {
   exitSelect(false);
   app.hidden = true; readerHost.hidden = false;
   document.title = store.seriesLabel(book);
-  const note = h('p', '正在打开…');
+  const note = h('p');
   readerHost.replaceChildren(h('div.loading',
     h('button.icon-btn.loading-back', { type: 'button', 'aria-label': '返回书架', onclick: leaveReader }, icon('back')),
-    h('h2', store.seriesLabel(book)), note));
+    loader('正在打开'), h('h2', store.seriesLabel(book)), note));
   let handle = null;
   try {
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -2061,6 +2112,7 @@ window.addEventListener('hashchange', route);
 store.onChange(() => { if (els && !app.hidden) renderAll(); });
 function startShelf() {
   document.body.classList.toggle('no-pill', !prefs.get('pill', true));
+  applyFabStyle();
   renderShelf();
   cameFromShelf = !location.hash.startsWith('#/read');
   route();
@@ -2078,6 +2130,7 @@ window.addEventListener('settings-synced', () => {
   applyTheme();
   view.layout = prefs.get('layout', view.layout); view.sort = prefs.get('sort', view.sort);
   document.body.classList.toggle('no-pill', !prefs.get('pill', true));
+  applyFabStyle();
   if (els) renderAll();
 });
 // 阅读器里点“去设置”：回到书架后打开对应的设置页

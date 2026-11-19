@@ -2,7 +2,7 @@
 import { routeChip } from './cloud-direct.js';
 import { ZipReader, mimeOf, isImageName } from './zip.js';
 import { prefs, setProgress, natural } from './store.js';
-import { h, icon, toast, menuButton, statusClock } from './ui.js';
+import { h, icon, loader, toast, menuButton, statusClock } from './ui.js';
 
 const DEFAULTS = { mode: 'page', rtl: true, spread: true, turn: 'slide', zoom: true, pageNum: true, applyAll: true };
 
@@ -84,7 +84,8 @@ export async function open({ host, book, title = book.title, source, progress, o
     const sideA = h('div.comic-page.is-side'), sideB = h('div.comic-page.is-side');
     const track = h('div.comic-track', sideA, cur, sideB);
     const touch = h('div.reader-touch');
-    stage.replaceChildren(track, touch);
+    const spinner = h('div.comic-loader', { hidden: true }, loader('正在加载这一页'));
+    stage.replaceChildren(track, spinner, touch);
     let token = 0, shown = -1, busy = false;
     const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
     const nextSide = () => (settings.rtl ? -1 : 1); // 下一页在屏幕哪一侧：日漫在左边
@@ -130,11 +131,11 @@ export async function open({ host, book, title = book.title, source, progress, o
       report(g[g.length - 1], saveNow);
       if (cur.dataset.page !== String(page) || !cur.childElementCount) {
         // 这一页还没取到时，过一小会儿显示“正在加载”，不让画面看起来卡住
-        const wait = setTimeout(() => { if (t === token) cur.classList.add('is-loading'); }, 150);
+        const wait = setTimeout(() => { if (t === token) { cur.classList.add('is-loading'); spinner.hidden = false; } }, 150);
         const ok = await fillPanel(cur, page);
         clearTimeout(wait);
         if (t !== token || destroyed) return;
-        cur.classList.remove('is-loading');
+        cur.classList.remove('is-loading'); spinner.hidden = true;
         if (!ok) { toast('这一页读不出来，可能是网络断了', { error: true }); return; }
         const turn = settings.turn;
         if (shown >= 0 && shown !== page && !calm && turn === 'fade') cur.animate([{ opacity: 0.2 }, { opacity: 1 }], { duration: 200, easing: 'ease-out' });
